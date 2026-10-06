@@ -133,3 +133,20 @@ docs/ARCHITECTURE.md           模块边界与数据流
 | `.editorconfig` | 比计划多了 `trim_trailing_whitespace` 与 md/json 缩进（无害偏离，已记录） |
 
 **另记（P2 期间已知的运行时特性）**：`core/pfand:106` 的 `ensure_s0i3()` 启动时会短暂写 `_FSL 1 0`（约 0.3s），在该窗口内轮询会让 smoke 的 `[1,120]` 检查出现罕见误报。
+
+## 附录 B：P1 复审延期项（Minor，不进修复轮）
+
+| 位置 | 问题 |
+|---|---|
+| `panel/index.html:14` | 副标题仍写死数据源 `thermal_zone9`；移植到别的机器即错，且不在静态扫描的 3 文件集合内。应改为从 `/api/now` 渲染或直接去掉 |
+| `core/pfanctl/pfanctl.c:98-103` | `ec88` 便捷语法硬编码 EC 路径；仓库内无调用方，但属于本阶段应去机器化的模块 → 并入 ⑱ |
+| `core/pfan` `detect --write` | 非原子写；中途崩溃会留下半截配置，下次开机 fail-close。应 temp + `mv` |
+| `EC_CMD` | 两侧加载器都要求、`detect` 也写入，但**没有任何消费者**（死键）。spec 要求它存在 → 补注释说明用途 |
+| `panel/app.js:40` vs `:77` | free 模式下看门狗是否接管，两处文案互相矛盾；代码（`GUARDED`）表明**会接管** → `:77` 与 `guard()` docstring 过期 |
+| `server/pfanel.py` `/api/levels` | 仍返回 `free_range:[0,120]` 与 "0~120"，而 0 在别处全面禁止（既存问题，纯文案矛盾） |
+| 目标机 `/opt/beszel/beszel_data/pfan.html` | 拆分后遗留的旧单文件；deploy 会备份但从不删除，无任何在用消费者 |
+
+**修复轮中顺手解决的（原为 Minor）**：`pfan set` 里 `$DEV` 未加引号；`PFAN_LOG` 在 fail-safe 分支之后才生效。
+
+**已知语义特性（P2 处理）**：`core/pfand:106` 的 `ensure_s0i3()` 启动时短暂写 `_FSL 1 0`（约 0.3s），
+该窗口内轮询会让 smoke 的 `[1,120]` 出现罕见误报 —— deploy 的 4b 等待接管判据已覆盖部署路径。
