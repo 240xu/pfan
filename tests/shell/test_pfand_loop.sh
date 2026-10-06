@@ -75,9 +75,20 @@ after=$(grep -c '升温\|微调' "$T/pfand.log" 2>/dev/null || true); after=${af
 [ "$after" -gt "$before" ] && ok "55C->75C 升档 ($before -> $after)" || ng "未升档 (log $before->$after) tail=$(tail -3 "$T/pfand.log" 2>/dev/null | tr '\n' '|')"
 
 echo "== T5: 过热必须打到应急档 =="
-echo 85000 > "$T/temp"; sleep 5
-if grep -qE '应急|set=100' "$T/pfand.log" 2>/dev/null || grep -q '_FSL 1 100' "$T/dl" 2>/dev/null; then
-  ok "85C >= EMERG(80) → 应急满速"
+# ⚠ 旧判据 `grep -qE '应急|set=100'` 会匹配启动横幅里的【应急80/100】—— 那一行是参数
+# 骨架，与应急触发毫无关系。于是 T5 在守护还没看到 85C 时就"通过"，T6 紧跟着把温度改成
+# 77C，守护全程没见过 85C，自然写不出 100 —— 2026-10-06 ci 间歇性失败的真实根因。
+# 改成：轮询等【真实事件】（日志"应急满速"或设备写入 100），最多 16s。
+echo 85000 > "$T/temp"
+hit5=0
+for i in $(seq 1 8); do
+  sleep 2
+  if grep -q '应急满速' "$T/pfand.log" 2>/dev/null || grep -q '_FSL 1 100' "$T/dl" 2>/dev/null; then
+    hit5=1; break
+  fi
+done
+if [ "$hit5" = 1 ]; then
+  ok "85C >= EMERG(80) → 应急满速 (第 $((i*2))s 观察到)"
 else ng "未见应急 (tail=$(tail -3 "$T/pfand.log" 2>/dev/null | tr '\n' '|'))"
 fi
 
