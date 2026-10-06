@@ -108,9 +108,6 @@ else
   bad "panel/app.js 缺 __PFAN_TOKEN__ 占位符"
 fi
 
-printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"
-exit "$rc"
-
 printf '\n=== 6. 平台配置（事故根因那份文件，必须存在且完整）===\n'
 PC=$(remote 'sudo -n cat /etc/pfan/platform.conf 2>/dev/null' || true)
 if [ -z "$PC" ]; then
@@ -132,3 +129,6 @@ if remote 'sudo -n test -s /etc/pfan/fan-candidates.txt' 2>/dev/null; then
 else
   bad "/etc/pfan/fan-candidates.txt 缺失 —— fail-safe 无候选可写"
 fi
+
+printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"
+exit "$rc"
