@@ -1,0 +1,12 @@
+# pfan 平台配置 —— 每台机器一份，由 `pfan detect` 生成后按实测校正。
+# 纯 KEY=VALUE；值中不要出现等号与前导空格。
+#
+# EC_ROOT 与 FAN_DEVICE 是【两个独立键】，不可互相推导：
+#   社区记录存在风扇设备位于 \_SB.IETM.TFN1 的机型（不在 EC0 下）。
+# THERMAL_ZONE 是【完整文件路径】，不是热区名 —— 索引因机器而异，
+#   必须用 `pfan detect` 按 type=x86_pkg_temp 现场探测，不要照抄。
+EC_ROOT=\_SB.PCI0.LPCB.EC0
+FAN_DEVICE=\_SB.PCI0.LPCB.EC0.TFN1
+THERMAL_ZONE=/sys/class/thermal/thermal_zone9/temp
+DEV=/dev/pfanctl
+EC_CMD=0xB5
