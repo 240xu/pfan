@@ -1,0 +1,14 @@
+# ⑭ /var/log/pfand.log 轮转
+# 必须用 copytruncate：pfand 用 `>>"$LOG"` 追加且【没有信号处理】，
+# 普通的 create/rename 会让它的 fd 继续指向被移走的文件，之后的日志全部丢失。
+/var/log/pfand.log {
+	daily
+	rotate 7
+	maxsize 10M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+	sharedscripts
+}

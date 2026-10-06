@@ -34,6 +34,7 @@ $S core/pfand core/pfan core/platform.sh               "pfan@$HOST:$STAGE/"
 $S server/pfanel.py server/pfan_platform.py server/pfan_core.py "pfan@$HOST:$STAGE/"
 $S panel/index.html panel/styles.css panel/app.js panel/core.js "pfan@$HOST:$STAGE/"
 $S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$STAGE/"
+$S deploy/logrotate.d/pfan                                "pfan@$HOST:$STAGE/"
 $R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
@@ -54,6 +55,11 @@ $R "set -e
     sudo -n install -m 755 '$STAGE/pfanel.py'    /usr/local/bin/pfanel.py
     sudo -n install -m 644 '$STAGE/pfan_platform.py' /usr/local/bin/pfan_platform.py
     sudo -n install -m 644 '$STAGE/pfan_core.py'     /usr/local/bin/pfan_core.py
+    # 3d. ⑭ 日志轮转：不装的话 /var/log/pfand.log 会无限长
+    sudo -n install -m 644 '$STAGE/pfan' /etc/logrotate.d/pfan
+    # 先做一次语法演练 —— 配置写错了要等一个月才爆，而且那时日志已经不可控
+    sudo -n logrotate -d /etc/logrotate.d/pfan >/dev/null
+    echo '  /etc/logrotate.d/pfan 已安装并通过 logrotate -d 自检'
     echo '  运行单元与加载器安装完成'" || { echo "安装失败"; $R "ls -la $STAGE"; exit 1; }
 
 # 面板静态文件（独立一段，路径写死，便于失败时定位）
@@ -90,6 +96,9 @@ done
 [ "$ready" = 1 ] || { echo "[FAIL] 30s 内控制回路未接管"; exit 1; }
 
 $R "systemctl is-active pfanel pfand"
+
+echo "== 4c/5 复核日志轮转已生效 =="
+$R "sudo -n logrotate -d /etc/logrotate.d/pfan 2>&1 | grep -E 'considering log file|error' | head -3 | sed 's/^/    /'"
 
 echo "== 5/5 实机冒烟 =="
 bash scripts/smoke.sh
