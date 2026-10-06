@@ -5,6 +5,11 @@
 # Termux 注意：/usr/bin/env 不存在，且无 /tmp 写权限 → 用 `bash scripts/smoke.sh` 调用。
 set -uo pipefail
 
+# fail-safe 蕴含式（TDD 可测，tests/shell/test_guards.sh 抽取本变量）
+# 语义：(温度读不到 或 温度>=EMERG) 是危险条件 ⇒ 必须满速；否则放行。
+# 用 --argjson emerg 注入实际 EMERG，不写死。
+GUARD_FAILSAFE_JQ='((.temp == null or .temp >= $emerg) | not) or (.level == 100)'
+
 HOST="${PFAN_HOST:-192.168.1.10}"
 API="${PFAN_API:-http://$HOST:8789}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/pfan"
@@ -14,6 +19,8 @@ rc=0
 ok(){ printf '  [ok]   %s\n' "$1"; }
 bad(){ printf '  [FAIL] %s\n' "$1"; rc=1; }
 remote(){ timeout 25 ssh "${OPTS[@]}" "pfan@$HOST" "$@"; }
+. "$(dirname "$0")/smoke-lib.sh"   # svc_verdict
+warn(){ printf '  [warn] %s\n' "$1"; }
 
 # 0) 可达性 —— 不可达必须失败，不许跳过
 if ! timeout 8 ssh "${OPTS[@]}" "pfan@$HOST" true 2>/dev/null; then
@@ -26,17 +33,18 @@ for s in pfanctl pfand pfanel; do
   st=$(remote "systemctl is-active $s" 2>/dev/null || true)
   en=$(remote "systemctl is-enabled $s" 2>/dev/null || true)
   nr=$(remote "systemctl show $s -p NRestarts --value" 2>/dev/null || true)
-  if [ "$st" = active ] && [ "$en" = enabled ] && [ "$nr" = 0 ]; then
-    ok "$s"
-  else
-    bad "$s: active=$st enabled=$en NRestarts=$nr"
-  fi
+  svc_verdict "$st" "$en" "$nr"; v=$?
+  case "$v" in
+    0) ok "$s" ;;
+    1) warn "$s 当前健康，但 NRestarts=$nr（历史计数，不阻断）" ;;
+    *) bad "$s: active=$st enabled=$en NRestarts=$nr" ;;
+  esac
 done
 
 printf '\n=== 2. API 形状（LAN）===\n'
 j=$(timeout 20 curl -fsS --max-time 12 "$API/api/now" 2>/dev/null) || { bad "LAN $API/api/now 不可达"; j=""; }
 if [ -n "$j" ]; then
-  if echo "$j" | jq -e '(.ts|type=="number") and (.temp|type=="number")
+  if echo "$j" | jq -e '(.ts|type=="number") and ((.temp == null) or (.temp|type=="number"))
         and (.level|type=="number") and (.ec76|type=="number")
         and (.rpm|type=="number") and (.mode|type=="string")
         and (.curve|type=="string") and (.gov|type=="string")
@@ -51,9 +59,10 @@ if [ -n "$j" ]; then
   else
     bad "level 越界: $(echo "$j" | jq -c .level 2>/dev/null)"
   fi
-  # 蕴含式：读不到温度(<=0 或 null) => 必须满速。温度正常时档位由曲线决定，不约束。
-  if echo "$j" | jq -e '(.temp > 0) or (.level == 100)' >/dev/null 2>&1; then
-    ok "fail-safe：温度异常即满速"
+  EMERG_V=$(grep -E '^EMERG=' config/pfand.conf.example 2>/dev/null | head -1 | cut -d= -f2)
+  [ -n "${EMERG_V:-}" ] || EMERG_V=80
+  if echo "$j" | jq -e --argjson emerg "$EMERG_V" "$GUARD_FAILSAFE_JQ" >/dev/null 2>&1; then
+    ok "fail-safe：温度>=EMERG($EMERG_V) 或读不到 ⇒ 满速"
   else
     bad "温度异常但非满速: $(echo "$j" | jq -c '{temp,level}' 2>/dev/null)"
   fi
@@ -64,16 +73,16 @@ code=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://
 if [ "$code" = 200 ]; then ok "pfan.example.com/pfan = 200"; else bad "公网入口 = $code"; fi
 
 printf '\n=== 4. 曲线参数权威源一致（repo vs 目标机 /etc/pfand.conf）===\n'
-remote 'sudo -n grep -E "^(IDLE|T1|T5|EMERG|CAP|E)=" /etc/pfand.conf' > "$CACHE/live.conf" 2>/dev/null \
-  || bad "读目标机 /etc/pfand.conf 失败"
-if [ -s "$CACHE/live.conf" ] && [ -f config/pfand.conf.example ]; then
-  for k in IDLE T1 T5 EMERG CAP E; do
-    a=$(grep -E "^$k=" config/pfand.conf.example | head -1)
-    b=$(grep -E "^$k=" "$CACHE/live.conf" | head -1)
-    if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$k 一致 ($a)"; else bad "$k 不一致: repo='$a' live='$b'"; fi
-  done
+if remote 'sudo -n sha256sum /etc/pfand.conf' > "$CACHE/live.sha" 2>/dev/null && [ -s "$CACHE/live.sha" ]; then
+  LIVE=$(awk '{print $1}' "$CACHE/live.sha")
+  REPO=$(sha256sum config/pfand.conf.example 2>/dev/null | awk '{print $1}')
+  if [ -n "$LIVE" ] && [ "$LIVE" = "$REPO" ]; then
+    ok "曲线参数整文件 sha256 一致 ($REPO)"
+  else
+    bad "曲线参数漂移: repo=${REPO:-<缺>} live=${LIVE:-<缺>}（含 EMERG_REL 等全部 24 项）"
+  fi
 else
-  bad "live.conf 或 config/pfand.conf.example 缺失"
+  bad "读目标机 /etc/pfand.conf 失败"
 fi
 
 printf '\n=== 5. 面板无硬编码密钥 ===\n'

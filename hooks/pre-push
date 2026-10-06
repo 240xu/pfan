@@ -7,9 +7,14 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 echo "== pre-push: bash scripts/ci.sh =="
 bash scripts/ci.sh || { echo "pre-push 拒绝：ci 未通过"; exit 1; }
 
-if ssh -i "$HOME/.ssh/pfan_deploy_key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=6 pfan@192.168.1.10 true 2>/dev/null; then
+probe_err=$(ssh -i "$HOME/.ssh/pfan_deploy_key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=6 pfan@192.168.1.10 true 2>&1 >/dev/null)
+if [ $? -eq 0 ]; then
   echo "== pre-push: bash scripts/smoke.sh（机器可达）=="
   bash scripts/smoke.sh || { echo "pre-push 拒绝：冒烟未通过"; exit 1; }
 else
-  echo "pre-push: 机器不可达，跳过 smoke（ci 仍强制）"
+  # 不可跳过的原因必须可见：机器宕、密钥缺失、没有 ssh 三者表现不同（复审 I5）
+  echo "pre-push: smoke 未运行 —— 原因如下（ci 仍强制）："
+  echo "$probe_err" | sed 's/^/    /'
+  echo "    如需在无该密钥的机器上有意跳过，显式设置 PFAN_SKIP_SMOKE=1"
+  [ "${PFAN_SKIP_SMOKE:-0}" = 1 ] && echo "    (PFAN_SKIP_SMOKE=1 已设置)"
 fi
