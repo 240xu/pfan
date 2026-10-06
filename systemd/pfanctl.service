@@ -1,0 +1,13 @@
+[Unit]
+Description=Panasonic CFQV8 fan ACPI evaluator (misc /dev/pfanctl)
+Before=pfand.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 幂等：模块已在跑则跳过；节点被误建成普通文件时先清掉
+ExecStart=/bin/sh -c "grep -q ^pfanctl /proc/modules || insmod /opt/pfanctl/pfanctl.ko"
+ExecStart=/bin/sh -c "test -c /dev/pfanctl || { rm -f /dev/pfanctl; grep -q ^pfanctl /proc/modules || insmod /opt/pfanctl/pfanctl.ko; }"
+
+[Install]
+WantedBy=multi-user.target

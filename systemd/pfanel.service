@@ -1,0 +1,13 @@
+[Unit]
+Description=Panasonic CFQV8 fan panel backend (ACPI collect+control)
+After=pfanctl.service
+Requires=pfanctl.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/pfanel.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

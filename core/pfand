@@ -1,0 +1,248 @@
+#!/bin/bash
+# pfand - 松下 CFQV8 风扇控制：分级骨架 + 细粒度微调
+#
+# 为什么需要 s0i3：s0i3(EC 0x79=0x02) 下固件退出热保护，EC 完全跟随 _FSL。
+# 其它模式下 EC 把风扇顶到 58~73%，本守护形同虚设。
+#
+# 为什么分级+微调而不是纯比例：
+#   实测本机 25%→70% 全核负载只差 5°C，扇热极强，比例增益标定不可靠；
+#   分级骨架已在 v2 验证稳定（4.5 分钟仅 3 次调档）。
+#   但固件支持 0~120 任意整数（fine_grain_control=1，实测 37/62/68 精确跟随），
+#   所以在骨架上叠加 ±TRIM 的连续微调，消掉台阶感。
+#
+# 微调的关键设计：trim 只快升慢降（每轮向 0 泄 1），像"增压后泄压"，
+#   天然带惯性，不会因温度小幅抖动而反复加加减减。
+#
+IDLE=50; L0=25
+T1=56; L1=30
+T2=62; L2=40
+T3=67; L3=50
+T4=72; L4=60
+T5=79; L5=70        # 上限
+EMERG=80; E=100
+EMERG_REL=75
+CAP=70              # 微调后硬上限
+TRIM=6              # 微调幅度 ±
+GAIN=1              # 每偏离 1°C 的微调量
+HYST=3              # 降档死区 °C
+DWELL=30            # 调档最小间隔 s
+DEAD=2              # 输出死区：与当前值差 <DEAD 不写
+IV=10
+
+F="\_SB.PCI0.LPCB.EC0.TFN1"
+DEV=/dev/pfanctl
+LOCK=/run/pfanel.lock
+# ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁，
+#    否则读到别人刚写的 RESULT（2026-10-05 审计）。
+exec 9>"$LOCK"
+Z=/sys/class/thermal/thermal_zone9/temp
+LOG=/var/log/pfand.log
+log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
+
+getL(){
+    # 必须等「新的 RESULT 行」出现：旧实现第一轮就取 tail -1，
+    # 而历史 RESULT 一直留在 dmesg 里 → 永远返回上次的旧值。
+    flock -x 9
+    local before after d found=""
+    # 时间戳判定（不是行数）：dmesg 环形缓冲会淘汰旧行，行数会下降
+    # awk -F'[][]' 拆第二段即可拿到时间戳；sed 需要数字紧跟 [，
+    # 而 dmesg 在秒数不足 5 位时会补空格（如 "[  862.946343]"），会导致匹配失败
+    before=$(dmesg 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+    echo "$F._FST" > "$DEV" 2>/dev/null
+    for _ in $(seq 1 20); do
+        sleep 0.12
+        after=$(dmesg 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+        if [ -n "$after" ] && [ -n "$before" ] && \
+           awk -v a="$after" -v b="$before" 'BEGIN{exit !(a>b)}'; then
+            d=$(dmesg 2>/dev/null | grep -oE "RESULT \[[0-9]+,[0-9]+" | tail -1)
+            [ -n "$d" ] && found="${d##*,}"
+            break
+        fi
+    done
+    flock -u 9
+    # 读不到就返回空：调用方据此判断「不确定」，绝不能当成"已经在目标档"
+    # （旧实现回退 ${written:-25}，导致启动对齐跳过写入，风扇停在 ensure_s0i3 的 0）
+    if [ -n "$found" ]; then echo "$found"; else echo ""; fi
+}
+setL(){ flock -x 9; echo "$F._FSL 1 $1" > "$DEV" 2>/dev/null; flock -u 9; }
+# 载入曲线参数（面板通过改 /etc/pfand.conf 调整；缺失时用脚本内默认值兜底）
+[ -r /etc/pfand.conf ] && . /etc/pfand.conf
+
+# ⑧ 只有 s0i3 模式才该由本守护接管。旧实现无条件 ensure_s0i3()，会把用户选的
+#    quiet/cool 静默改成 s0i3（set_curve("auto") 也会 restart pfand 触发）。
+CURVE_FILE=/var/lib/pfanel/curve.state
+CURVE=$(python3 -c "import json;print(json.load(open('$CURVE_FILE'))['curve'])" 2>/dev/null || echo auto)
+if [ "$CURVE" != "s0i3" ]; then
+    log "当前曲线=$CURVE (非 s0i3)，pfand 不接管，正常退出"
+    exit 0
+fi
+
+# ③ 配置自校验：/etc/pfand.conf 可被直接编辑（绕过 panel 的 validate_params），
+#    非法值会让应急逻辑失效（实测：EMERG=53 但 EMERG_REL=75 → 应急进得去立刻出来）。
+#    不校验就把风扇交给一个坏掉的控制律，所以非法就 fail-safe 满速退出。
+_cfg_bad=0
+for _k in IDLE T1 T2 T3 T4 T5 L0 L1 L2 L3 L4 L5 EMERG E EMERG_REL CAP TRIM GAIN HYST DWELL DEAD IV; do
+    eval "_v=\${$_k:-}"
+    case "$_v" in
+        "" | *[!0-9]*)
+            log "配置项 $_k 非法('$_v') -> fail-safe 满速 100% 并退出"
+            _cfg_bad=1 ;;
+    esac
+done
+if [ "$_cfg_bad" = "0" ]; then
+    # 进入阈值必须高于退出阈值，否则应急形同虚设
+    if [ "$EMERG_REL" -ge "$EMERG" ] || [ "$T5" -ge "$EMERG" ] || [ "$L5" -gt "$CAP" ]; then
+        log "配置不自洽(EMERG_REL=$EMERG_REL EMERG=$EMERG T5=$T5 L5=$L5 CAP=$CAP) -> fail-safe 满速 100% 并退出"
+        _cfg_bad=1
+    fi
+fi
+if [ "$_cfg_bad" = "1" ]; then
+    flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
+    exit 0
+fi
+
+ensure_s0i3(){
+    flock -x 9
+    echo "$F._FSL 1 0" > "$DEV" 2>/dev/null; sleep 0.3
+    echo "$F.EC88 4 181 0x79 0x02 0" > "$DEV" 2>/dev/null
+    flock -u 9
+    sleep 0.3
+}
+
+want_for(){
+    local t=$1
+    [ "$t" -ge "$EMERG" ] && { echo "$E"; return; }
+    [ "$t" -le "$IDLE" ] && { echo "$L0"; return; }
+    [ "$t" -le "$T1" ]   && { echo "$L1"; return; }
+    [ "$t" -le "$T2" ]   && { echo "$L2"; return; }
+    [ "$t" -le "$T3" ]   && { echo "$L3"; return; }
+    [ "$t" -le "$T4" ]   && { echo "$L4"; return; }
+    [ "$t" -le "$T5" ]   && { echo "$L5"; return; }
+    echo "$E"
+}
+# 该档的触发下界（升到它是因为超过了这个值）
+floor_of(){
+    case "$1" in
+        25) echo "-999" ;; 30) echo "$IDLE" ;; 40) echo "$T1" ;;
+        50) echo "$T2" ;;   60) echo "$T3" ;;  70) echo "$T4" ;;
+        *)  echo "$EMERG" ;;
+    esac
+}
+# 该档所在带的中心温度（微调基准）
+center_of(){
+    case "$1" in
+        25) echo "$IDLE" ;;  30) echo $(( (IDLE+T1)/2 )) ;;
+        40) echo $(( (T1+T2)/2 )) ;; 50) echo $(( (T2+T3)/2 )) ;;
+        60) echo $(( (T3+T4)/2 )) ;; 70) echo $(( (T4+T5)/2 )) ;;
+        *)  echo "$EMERG" ;;
+    esac
+}
+
+# ① 温度读取必须 fail-safe：读不到 → T=-1 → 立刻满速。
+# 旧写法 `|| echo 0` 会 T=0 → want_for(0) 命中 <=IDLE → 风扇降到最低，
+# 即传感器故障时风扇反而转得最慢（审计最严重的一项）。
+readT(){
+    local v
+    v=$(cat "$Z" 2>/dev/null)
+    case "$v" in
+        "" | *[!0-9]*) T=-1 ;;
+        *) T=$((v / 1000)); # 0 不可能是真实 CPU 温度，读到视为传感器故障 -> fail-safe
+            [ "$T" -le 0 ] && T=-1 ;;
+    esac
+}
+readT
+log "[参数来源 /etc/pfand.conf] 骨架 ${L0}/${L1}/${L2}/${L3}/${L4}/${L5} 应急${EMERG}/${E} 微调±${TRIM}(${GAIN}/C) 上限${CAP} 死区${HYST}C 驻留${DWELL}s 输出死区${DEAD} 采样${IV}s"
+ensure_s0i3
+
+written=$(getL)
+# 读不到 → -1，使 d=|L-(-1)| 必然 >= DEAD，保证一定会把档位写下去
+[ -z "$written" ] && written=-1
+base=25; trim=0; emerg=0; last=$(date +%s)
+
+apply(){  # $1=目标值  $2=说明
+    local L=$1
+    [ "$L" -lt 25 ] && L=25
+    [ "$L" -gt "$CAP" ] && L=$CAP
+    local d=$(( L - written )); [ $d -lt 0 ] && d=$(( -d ))
+    if [ "$d" -ge "$DEAD" ] || [ "$L" = "$E" ]; then
+        setL "$L"; written=$L; last=$(date +%s)
+        log "$2 set=$L T=${T}C base=$base trim=${trim}"
+    fi
+}
+
+# 启动对齐（读温失败时直接满速并跳过曲线）
+if [ "$T" -lt 0 ]; then
+    log "启动时温度读取失败 -> fail-safe 满速 ${E}%"
+    base=$E
+    setL "$E"; written=$E
+else
+    tgt=$(want_for $T); base=$tgt
+fi
+tgt=$(want_for $T); base=${base:-$tgt}
+c=$(center_of "$base"); w=$(( (T - c) * GAIN ))
+[ $w -gt $TRIM ] && w=$TRIM; [ $w -lt -$TRIM ] && w=$((-TRIM)); trim=$w
+apply "$(want_for $T)" "启动"
+
+while :; do
+    sleep "$IV"
+    now=$(date +%s)
+    readT
+    if [ "$T" -lt 0 ]; then
+        setL "$E"; written=$E
+        log "温度读取失败 -> fail-safe 满速 ${E}%"
+        continue
+    fi
+    # ⑦ 对账：内部 written 只是自记，外部（面板/pfan/别的实例）改档或写失败时会失真。
+    #    每轮读回真实 _FST 校正，DEAD 死区才建在真实值上。
+    actual=$(getL)
+    if [ -n "$actual" ] && [ "$actual" != "$written" ]; then
+        log "对账: written=$written -> 实际=$actual (外部改档或写入未生效)"
+        written=$actual
+    fi
+    tgt=$(want_for $T)
+
+    # ---- 应急：进入易，退出难（锁定到 EMERG_REL） ----
+    if [ "$tgt" = "$E" ] && [ "$emerg" = "0" ]; then
+        emerg=1; trim=0; setL "$E"; written=$E; base=$E; last=$now
+        log "应急满速 T=${T}C >= ${EMERG}C"; continue
+    fi
+    if [ "$emerg" = "1" ]; then
+        # ③ 应急期间每次复核：风扇必须真的在 E 档（写失败/被抢都要重推）
+        if [ "$written" != "$E" ]; then
+            _prev="$written"
+            setL "$E"; written=$E; last=$now
+            log "应急重推: 实际=$_prev -> $E T=${T}C"
+        fi
+        [ "$T" -le "$EMERG_REL" ] || continue
+        emerg=0; base=$(want_for "$T"); trim=0; last=$now
+        log "应急解除 T=${T}C"; continue
+    fi
+
+    # ---- 骨架升档：立即（散热优先） ----
+    if [ "$tgt" -gt "$base" ]; then
+        base=$tgt; trim=0; apply "$base" "升温"; continue
+    fi
+    # ---- 骨架降档：需跌出死区 + 过驻留 ----
+    if [ "$tgt" -lt "$base" ]; then
+        f=$(floor_of "$base")
+        if [ $((T - (f - HYST))) -le 0 ] && [ $((now - last)) -ge "$DWELL" ]; then
+            base=$tgt; trim=0; apply "$base" "降温"; continue
+        fi
+    fi
+
+    # ---- 细粒度微调：快升慢降（泄放），仅在骨架稳定时生效 ----
+    c=$(center_of "$base")
+    w=$(( (T - c) * GAIN ))
+    [ $w -gt $TRIM ] && w=$TRIM
+    [ $w -lt -$TRIM ] && w=$((-TRIM))
+    if [ "$w" -ne "$trim" ]; then
+        if [ "$w" -gt "$trim" ]; then
+            trim=$w                                   # 升温立即跟随
+        elif [ $((now - last)) -ge "$DWELL" ]; then
+            if [ "$trim" -gt 0 ]; then trim=$(( trim-1 ))
+            elif [ "$trim" -lt 0 ]; then trim=$(( trim+1 ))
+            fi
+        fi
+    fi
+    [ $((now - last)) -ge 8 ] && apply $(( base + trim )) "微调"
+done

@@ -1,0 +1,15 @@
+[Unit]
+Description=Panasonic CFQV8 smart fan curve (ACPI _FSL closed loop)
+After=multi-user.target pfanctl.service
+Requires=pfanctl.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pfand
+# on-failure 而非 always：非 s0i3 模式下 pfand 主动 exit 0（⑧ 曲线守卫）时
+# 不应被拉起，否则每 15s 重启一次形成空转循环。真实崩溃(非0)仍会重启。
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

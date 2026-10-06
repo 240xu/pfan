@@ -1,0 +1,15 @@
+*.ko
+*.o
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+.cache/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.token
+.superpowers/
