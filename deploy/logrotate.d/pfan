@@ -1,6 +1,10 @@
 # ⑭ /var/log/pfand.log 轮转
 # 必须用 copytruncate：pfand 用 `>>"$LOG"` 追加且【没有信号处理】，
 # 普通的 create/rename 会让它的 fd 继续指向被移走的文件，之后的日志全部丢失。
+# su 必填：/var/log 是 775 root:syslog（组可写），logrotate 遇到非 root 组可写的
+# 父目录会直接拒转（"insecure permissions"）。缺这行要等部署时的 -d 自检才炸。
+su root syslog
+
 /var/log/pfand.log {
 	daily
 	rotate 7
