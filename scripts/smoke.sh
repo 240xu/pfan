@@ -68,6 +68,19 @@ if [ -n "$j" ]; then
   fi
 fi
 
+printf '\n=== 2b. 读接口不得发通配 CORS（②⑦）===\n'
+# 必须用 GET：旧版 pfanel 未实现 do_HEAD，HEAD 会 501 且根本不进 _send，
+# 拿它检查会得到"没有这个头"的假阳性（2026-10-06 实测踩过）。
+acao=$(timeout 30 curl -sS -D - -o /dev/null --max-time 20 "$API/api/now" 2>/dev/null \
+       | tr -d '\r' | grep -i '^access-control-allow-origin:' || true)
+if [ -z "$acao" ]; then
+  ok "无 Access-Control-Allow-Origin（同源面板不需要 CORS）"
+elif echo "$acao" | grep -qi '\*'; then
+  bad "仍是通配 CORS: $acao —— LAN 内任意网页可跨域读遥测"
+else
+  ok "非通配 CORS: $acao"
+fi
+
 printf '\n=== 3. 公网入口 ===\n'
 code=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://pfan.example.com/pfan 2>/dev/null || echo 000)
 if [ "$code" = 200 ]; then ok "pfan.example.com/pfan = 200"; else bad "公网入口 = $code"; fi
