@@ -112,3 +112,17 @@ docs/ARCHITECTURE.md           模块边界与数据流
 - 曲线参数权威源 = 目标机 `/etc/pfand.conf`
 - 写接口鉴权（Token + Origin）；读接口有意不鉴权 → 必须由 ufw 限 LAN
 - 工作区一律 UTC+8
+
+## 附录 A：P0 复审延期项（Minor，不进修复轮，留待顺手处理）
+
+| 位置 | 问题 |
+|---|---|
+| `README:22` | `./scripts/install-hooks.sh` 在 Termux 失败（`/usr/bin/env`），应写 `bash scripts/install-hooks.sh` |
+| `README:31` | "机器不可达时只跑 ci，smoke 不 skip 只 FAIL" 自相矛盾（**钩子**会 skip，smoke 本身从不 skip），应拆成两条 |
+| `BASELINE.sha256` | `server/pfanel.py` 已过期且仓库内无说明（其唯一消费者 `verify-import.sh` 已在 43da01a 删除） |
+| `package.json` | `"test": "echo Error... && exit 1"` 使 `npm test` 恒失败；`"main": "index.js"` 不存在 |
+| `smoke.sh:63` | 连接失败时 `$(... || echo 000)` 可能得到 `000000`；取 `${code:0:3}` |
+| `smoke.sh` 第 5 段 | 扫的是**仓库**面板副本，而线上服务的是 `/opt/beszel/beszel_data/pfan.html`（今日字节一致；应改名或加部署件哈希） |
+| `.editorconfig` | 比计划多了 `trim_trailing_whitespace` 与 md/json 缩进（无害偏离，已记录） |
+
+**另记（P2 期间已知的运行时特性）**：`core/pfand:106` 的 `ensure_s0i3()` 启动时会短暂写 `_FSL 1 0`（约 0.3s），在该窗口内轮询会让 smoke 的 `[1,120]` 检查出现罕见误报。
