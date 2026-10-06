@@ -1,4 +1,5 @@
-import { checkTempOrder, dbOf, esc, fmtTemp, rpmOf } from "/pfan-core.js";
+import { checkTempOrder, dbOf, esc, fetchJson, fmtTemp, isStale,
+         rpmOf, statusText } from "/pfan-core.js";
 
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
@@ -11,7 +12,26 @@ async function j(u,o){
   if((o.method||"GET").toUpperCase()==="POST"){
     o.headers=Object.assign({},o.headers,{"X-Pfan-Token":TOKEN});
   }
-  const r=await fetch(u,o);return r.json();
+  // ⑰ 网络/HTTP/解析三类失败都会被 fetchJson 翻成带原因的 Error，
+  // 调用方必须 catch —— 否则在 setInterval 里会变成未捕获异常、面板静默停更。
+  return fetchJson(u,o);
+}
+
+/* ---------------- ⑰ 连接状态与数据新鲜度 ---------------- */
+let lastSnap=null;
+function setConn(err){
+  const e=document.getElementById("conn-st"); if(!e) return;
+  const t=statusText(lastSnap,20,err);
+  e.textContent=t;
+  // 绿=实时；黄=滞后/缓存；红=取数失败
+  e.style.color = err ? "#f85149" : (t==="实时" ? "#3fb950" : "#d29922");
+}
+async function pollNow(){
+  try{
+    lastSnap=await j(API+"/api/now");
+    paint(lastSnap);
+    setConn(null);
+  }catch(e){ setConn(e&&e.message||String(e)); }
 }
 
 function paint(d){
@@ -370,20 +390,26 @@ async function saveParams(){
 
 async function boot(){
   buildLv();
-  const lv=await j(API+"/api/levels");
-  window.FPS = lv.fps;   // 权威 _FPS 表，band 渲染的 rpmOf/dbOf 用它
-  document.querySelector("#fps tbody").innerHTML=Object.entries(lv.fps).map(([k,v])=>
-    `<tr><td>${k}%</td><td class="mono">${v[0]}</td><td class="mono">${v[1]}</td>
-     <td class="mono">${(v[2]/1000).toFixed(2)}</td></tr>`).join("");
-  MODE=(await j(API+"/api/mode")).mode;
-  const pf=await j(API+"/api/profile");
-  GUARD_TEMP=pf.guard_temp||82;
-  window.CURVE=await j(API+"/api/curve");
-  paint(await j(API+"/api/now"));
-  renderCurve(window.CURVE||{params:{},bands:[]});
+  // ⑰ 任一初始化请求失败都【不能】让 boot 整个死掉 —— 那样面板会一直空白，
+  // 而且轮询根本没启动，连"重连"的机会都没有。
+  try{
+    const lv=await j(API+"/api/levels");
+    window.FPS = lv.fps;   // 权威 _FPS 表，band 渲染的 rpmOf/dbOf 用它
+    document.querySelector("#fps tbody").innerHTML=Object.entries(lv.fps).map(([k,v])=>
+      `<tr><td>${k}%</td><td class="mono">${v[0]}</td><td class="mono">${v[1]}</td>
+       <td class="mono">${(v[2]/1000).toFixed(2)}</td></tr>`).join("");
+    MODE=(await j(API+"/api/mode")).mode;
+    const pf=await j(API+"/api/profile");
+    GUARD_TEMP=pf.guard_temp||82;
+    window.CURVE=await j(API+"/api/curve");
+    renderCurve(window.CURVE||{params:{},bands:[]});
+  }catch(e){
+    setConn(e&&e.message||String(e));
+  }
+  await pollNow();
   renderEvents();
   refreshHist();
-  setInterval(async()=>paint(await j(API+"/api/now")),8000);
+  setInterval(pollNow,8000);
   document.getElementById('conly')?.addEventListener('change',drawScatter);
   setInterval(refreshHist,45000);
   setInterval(()=>renderEvents(),30000);

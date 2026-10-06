@@ -52,3 +52,41 @@ export function dbOf(level, fps) {
   const e = nearestFpsEntry(level, fps);
   return e ? (e[1] / 1000).toFixed(1) : null;
 }
+
+/** ⑰ JSON 取数：把网络层 / HTTP 层 / 解析层三类失败翻译成【带原因】的错误。
+ *  旧实现是 `const r = await fetch(u,o); return r.json();` —— 三个坑各踩一个，
+ *  轮询回调里就会抛未捕获异常：面板静默停更，而且没有任何提示。 */
+export async function fetchJson(url, opts, fetchImpl) {
+  const f = fetchImpl || fetch;
+  let r;
+  try {
+    r = await f(url, opts);
+  } catch (e) {
+    throw new Error("网络错误: " + ((e && e.message) || e));
+  }
+  if (!r || !r.ok) throw new Error("HTTP " + (r ? r.status : "?"));
+  try {
+    return await r.json();
+  } catch (e) {
+    throw new Error("响应不是合法 JSON: " + ((e && e.message) || e));
+  }
+}
+
+/** ⑰ 快照是否已过期：服务端标了 cached，或 age 超过采样周期(10s)的两倍。 */
+export function isStale(d, maxAge = 20) {
+  if (!d) return true;
+  if (d.cached) return true;
+  if (typeof d.age === "number" && d.age > maxAge) return true;
+  return false;
+}
+
+/** ⑰ 状态条文案：实时 / 数据滞后 / 缓存 / 中断。err 非空时优先显示错误原因。 */
+export function statusText(d, maxAge = 20, err = null) {
+  if (err) return "⚠ " + err;
+  if (!d) return "⚠ 无数据（连接中断？）";
+  if (d.cached) return "缓存快照（服务端未实时刷新）";
+  if (typeof d.age === "number" && d.age > maxAge) {
+    return "数据滞后 " + Math.round(d.age) + "s（采样中断？）";
+  }
+  return "实时";
+}

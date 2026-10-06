@@ -41,8 +41,13 @@ fi
 if [ -f panel/core.js ]; then
   node --check panel/core.js && ok "core.js node --check 通过" || ng "core.js 语法错误"
   grep -qE '^export ' panel/core.js && ok "core.js 有 export（可被 vitest 导入）" || ng "core.js 无 export"
-  grep -qE 'document\.|window\.|setInterval' panel/core.js \
-    && ng "core.js 含 DOM/副作用 —— 测试无法安全导入" || ok "core.js 无 DOM/副作用"
+  # 只看代码行：注释里提 setInterval/document 不构成副作用，匹配它只是假阳性。
+  if grep -vE '^[[:space:]]*(\*|/\*|//)' panel/core.js | grep -qE 'document\.|window\.|setInterval'; then
+    ng "core.js 含 DOM/副作用 —— 测试无法安全导入"
+    grep -vE '^[[:space:]]*(\*|/\*|//)' panel/core.js | grep -nE 'document\.|window\.|setInterval' | sed 's/^/      /'
+  else
+    ok "core.js 无 DOM/副作用（已忽略注释行）"
+  fi
 else
   ng "缺 panel/core.js"
 fi

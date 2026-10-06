@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
-import { checkTempOrder, dbOf, esc, fmtTemp, rpmOf } from "../../panel/core.js";
+import { checkTempOrder, dbOf, esc, fetchJson, fmtTemp, isStale,
+         rpmOf, statusText } from "../../panel/core.js";
 
 // 与 /etc/pfand.conf 实测一致
 const CFG = {
@@ -76,5 +77,96 @@ describe("app.js 不再自带残缺 rpm 表（②⑧）", () => {
     expect(src).not.toMatch(/nz\s*=\s*\{/);
     expect(src).toMatch(/import\s*\{[^}]*rpmOf/);
     expect(src).toMatch(/import\s*\{[^}]*dbOf/);
+  });
+});
+
+// ---------------- ⑰ fetch 错误处理 + cached/age ----------------
+
+describe("fetchJson（⑰ 错误必须被翻译成人话）", () => {
+  test("网络层拒绝 → 带原因抛出，而不是静默", async () => {
+    const bad = async () => { throw new TypeError("Failed to fetch"); };
+    await expect(fetchJson("/api/now", {}, bad)).rejects.toThrow(/网络/);
+  });
+
+  test("HTTP 500 → 抛出带状态码的错误", async () => {
+    const stub = async () => ({ ok: false, status: 500, json: async () => ({}) });
+    await expect(fetchJson("/api/now", {}, stub)).rejects.toThrow(/HTTP 500/);
+  });
+
+  test("401 也必须抛（不能把鉴权失败当成功）", async () => {
+    const stub = async () => ({ ok: false, status: 401, json: async () => ({}) });
+    await expect(fetchJson("/api/level", { method: "POST" }, stub)).rejects.toThrow(/HTTP 401/);
+  });
+
+  test("响应不是 JSON → 抛出可读错误（旧实现 r.json() 直接抛 SyntaxError）", async () => {
+    const stub = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected token <"); } });
+    await expect(fetchJson("/api/now", {}, stub)).rejects.toThrow(/JSON/);
+  });
+
+  test("正常响应 → 返回解析后的对象", async () => {
+    const stub = async () => ({ ok: true, status: 200, json: async () => ({ temp: 50 }) });
+    await expect(fetchJson("/api/now", {}, stub)).resolves.toEqual({ temp: 50 });
+  });
+});
+
+describe("isStale / statusText（⑰ cached 与 age）", () => {
+  test("cached=true 视为过期（拿的是缓存快照）", () => {
+    expect(isStale({ temp: 50, cached: true, age: 1 })).toBe(true);
+  });
+
+  test("age 超过阈值（默认 20s，采样周期 10s 的两倍）视为过期", () => {
+    expect(isStale({ temp: 50, cached: false, age: 5 })).toBe(false);
+    expect(isStale({ temp: 50, cached: false, age: 32 })).toBe(true);
+  });
+
+  test("连续快照都没来 → 无对象也算过期", () => {
+    expect(isStale(null)).toBe(true);
+    expect(isStale(undefined)).toBe(true);
+  });
+
+  test("实时数据不算过期", () => {
+    expect(isStale({ temp: 50, cached: false, age: 2 })).toBe(false);
+  });
+
+  test("statusText 要能区分「实时 / 缓存 / 中断」", () => {
+    expect(statusText({ temp: 50, cached: false, age: 2 })).toMatch(/实时/);
+    expect(statusText({ temp: 50, cached: false, age: 32 })).toMatch(/32|缓存/);
+    expect(statusText({ temp: 50, cached: true, age: 3 })).toMatch(/缓存/);
+    expect(statusText(null)).toMatch(/中断|无数据/);
+  });
+
+  test("statusText 接受自定义错误（fetch 失败时）", () => {
+    expect(statusText({ temp: 50, cached: false, age: 2 }, 20, "HTTP 500")).toMatch(/HTTP 500/);
+  });
+});
+
+// 本套只配了 describe/test/expect 全局（没有 beforeAll），所以每次测试自己读源码。
+async function appSrc() {
+  const { readFileSync } = await import("node:fs");
+  return readFileSync(new URL("../../panel/app.js", import.meta.url), "utf8");
+}
+
+describe("app.js 轮询必须有错误保护（⑰）", () => {
+  test("没有裸的 setInterval(async()=>paint(await j(...)))", async () => {
+    const src = await appSrc();
+    expect(src).not.toMatch(/setInterval\(\s*async\s*\(\s*\)\s*=>\s*paint\(\s*await\s*j\(/);
+  });
+
+  test("取数走 pollNow，且它有 try/catch", async () => {
+    const src = await appSrc();
+    expect(src).toMatch(/setInterval\(pollNow,\s*8000\)/);
+    expect(src).toMatch(/async function pollNow\(\)\s*\{[\s\S]*?try\{[\s\S]*?\}catch\(/);
+  });
+
+  test("j() 不再直接 r.json()（必须经过 fetchJson）", async () => {
+    const src = await appSrc();
+    expect(src).not.toMatch(/const r\s*=\s*await\s*fetch\(u,\s*o\)\s*;\s*return\s*r\.json\(\)/);
+    expect(src).toMatch(/return fetchJson\(u,\s*o\)/);
+  });
+
+  test("boot 里有状态位 conn-st 与容错", async () => {
+    const src = await appSrc();
+    expect(src).toMatch(/conn-st/);
+    expect(src).toMatch(/async function boot\(\)\s*\{[\s\S]*?try\{[\s\S]*?\}catch\(/);
   });
 });
