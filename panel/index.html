@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Panasonic 风扇控制台</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<!-- time 轴必需：Chart.js 4 的日期适配器，缺了会抛 "This method is not implemented: Check that a complete date adapter is provided" -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<link rel="stylesheet" href="/pfan.css">
+</head>
+<body>
+<h1>Panasonic CFQV8 风扇控制台</h1>
+<div class="sub">ACPI <code>TFN1._FSL</code> 档位控制 · EC <code>0x76</code> 实时状态 · 数据源 <code>/sys/class/thermal/thermal_zone9</code></div>
+
+<div class="mode">
+  <span class="st d" id="m-st">守护模式</span>
+  <span class="tx" id="m-tx">正在由 pfand 守护按温度曲线自动调档。手动改档会在 10 秒内被守护覆盖。</span>
+  <button onclick="setHold()" id="b-hold">接管（手动控制）</button>
+  <button onclick="setAuto()" id="b-auto2">交还守护</button>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="k">CPU 温度</div><div class="v" id="c-temp">--<span class="u">°C</span></div>
+    <div class="bar"><i id="c-temp-bar" style="width:0"></i></div></div>
+  <div class="card"><div class="k">当前设定档位</div><div class="v" id="c-lvl">--<span class="u">%</span></div>
+    <div class="bar"><i id="c-lvl-bar" style="width:0;background:#3fb950"></i></div></div>
+  <div class="card"><div class="k">EC 实际状态</div><div class="v" id="c-ec">--<span class="u">%</span></div>
+    <div class="hint" id="c-ec-note">—</div></div>
+  <div class="card"><div class="k">估算转速</div><div class="v" id="c-rpm">--<span class="u">rpm</span></div>
+    <div class="hint" id="c-rpm-note">—</div></div>
+</div>
+
+<div class="panel">
+  <h2>温控曲线（pfand 分级骨架 + 细粒度微调）</h2>
+  <div class="rows">
+    <div>
+      <table id="cvtbl"><thead><tr><th>温度</th><th>档位</th><th>RPM</th><th>噪音dB</th><th>当前</th></tr></thead><tbody></tbody></table>
+      <div class="hint" id="cvparams"></div>
+    </div>
+    <div>
+      <div class="hint" style="margin-bottom:4px">
+        实测轨迹（每点 = 一次采样，横轴温度、纵轴档位；点云自己描出阶梯形状 = 曲线在真实工作）
+        <br><label style="cursor:pointer"><input type="checkbox" id="conly" checked>
+        只看<b>曲线实际管控中</b>的样本（排除切换曲线的 0 档、手动测试值）</label></div>
+      <div class="chartbox" style="height:250px"><canvas id="ch3"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>事件流（曲线切换 / 应急 / 看门狗）</h2>
+  <table id="ev"><thead><tr><th>时间</th><th>类型</th><th>内容</th></tr></thead><tbody></tbody></table>
+</div>
+
+<div class="panel">
+  <h2>风扇曲线（EC 0x79）— 比档位更根本</h2>
+  <div class="lv">
+    <button onclick="setCurve('quiet')" id="cv-quiet">quiet 固件曲线</button>
+    <button onclick="setCurve('s0i3')"  id="cv-s0i3">s0i3 中间档</button>
+    <button onclick="setCurve('cool')"  id="cv-cool">cool 性能曲线</button>
+    <button onclick="openEditor()"      id="cv-edit">⚙ 自定义曲线</button>
+    <button onclick="setCurve('auto')"  id="cv-auto">交还固件曲线</button>
+  </div>
+  <div class="hint" id="curve-note"></div>
+</div>
+
+<div class="panel" id="editor" style="display:none">
+  <h2>自定义曲线编辑器 <span class="tag" id="ed-src">/etc/pfand.conf</span></h2>
+  <div class="hint" style="margin-bottom:10px">
+    改完点「保存并重启守护」生效。温度必须<b>严格递增</b>，档位在 0~上限 之间。
+  </div>
+  <div class="rows">
+    <div>
+      <table id="edt"><thead><tr><th>温度上限 °C</th><th>档位 %</th><th>RPM</th><th>噪音dB</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div>
+      <table id="eda"><thead><tr><th>参数</th><th>值</th><th>说明</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+    <button onclick="saveParams()" id="ed-save" style="background:#238636;border-color:#2ea043;color:#fff">保存并重启守护</button>
+    <button onclick="closeEditor()">取消</button>
+    <button onclick="resetParams()">恢复当前生效值</button>
+  </div>
+  <div class="hint" id="ed-msg" style="margin-top:8px"></div>
+</div>
+
+<div class="panel">
+  <h2>档位控制（ACPI _FSL）</h2>
+  <div class="lv" id="levels"></div>
+  <div class="hint">点任意档位 = 自动进入<b>接管模式</b>并锁定该档位；点「交还守护」恢复按温度自动调节。</div>
+</div>
+
+<div class="rows">
+  <div class="panel"><h2>温度 &amp; 档位（12h）</h2><div class="chartbox"><canvas id="ch1"></canvas></div></div>
+  <div class="panel"><h2>EC 实时风扇状态（0x76）</h2><div class="chartbox"><canvas id="ch2"></canvas></div></div>
+</div>
+
+<div class="rows">
+  <div class="panel"><h2>档位表（_FPS 官方数据）</h2>
+    <table id="fps"><thead><tr><th>档位%</th><th>RPM</th><th>噪音 mdB</th><th>功率 W</th></tr></thead><tbody></tbody></table>
+    <div class="hint">噪音值取自 <code>/sys/bus/acpi/devices/INT3404:00/state*</code> 第 4 字段。25% 比 100% 安静 37.5 dB。</div>
+  </div>
+  <div class="panel"><h2>最近采样</h2>
+    <table id="hist"><thead><tr><th>时间</th><th>温度</th><th>档位</th><th>EC</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<script type="module" src="/pfan.js"></script>
+</body>
+</html>

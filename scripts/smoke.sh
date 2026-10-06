@@ -86,14 +86,15 @@ else
 fi
 
 printf '\n=== 5. 面板无硬编码密钥 ===\n'
-if grep -q '__PFAN_TOKEN__' panel/pfanpanel.html; then
-  if grep -qE 'sk-[A-Za-z0-9]{20,}|Bearer [A-Za-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' panel/pfanpanel.html; then
+# 拆分后 Token 占位符在 app.js（服务端 /pfan.js 注入），HTML 里不应有明文
+if grep -q '__PFAN_TOKEN__' panel/app.js; then
+  if grep -qE 'sk-[A-Za-z0-9]{20,}|Bearer [A-Za-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' panel/app.js panel/index.html; then
     bad "面板疑似含真实密钥/UUID"
   else
-    ok "面板只含 __PFAN_TOKEN__ 占位符"
+    ok "panel/app.js 只含 __PFAN_TOKEN__ 占位符"
   fi
 else
-  bad "面板缺 __PFAN_TOKEN__ 占位符"
+  bad "panel/app.js 缺 __PFAN_TOKEN__ 占位符"
 fi
 
 printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"

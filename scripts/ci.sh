@@ -19,7 +19,7 @@ done
 
 # 必需文件清单 —— 缺一个就报红（复审 C1：之前 [ -f ] && 数组追加会静默跳过删除的文件）
 step "required file inventory"
-REQUIRED_FILES="core/pfand core/pfan server/pfanel.py core/pfanctl/pfanctl.c core/pfanctl/Makefile panel/pfanpanel.html config/pfand.conf.example systemd/pfand.service systemd/pfanel.service systemd/pfanctl.service scripts/ci.sh scripts/smoke.sh scripts/smoke-lib.sh hooks/pre-push ruff.toml"
+REQUIRED_FILES="core/pfand core/pfan core/platform.sh server/pfanel.py server/pfan_platform.py core/pfanctl/pfanctl.c core/pfanctl/Makefile panel/index.html panel/styles.css panel/app.js panel/core.js platform/platform.conf.example platform/fan-candidates.txt config/pfand.conf.example systemd/pfand.service systemd/pfanel.service systemd/pfanctl.service scripts/ci.sh scripts/smoke.sh scripts/smoke-lib.sh hooks/pre-push ruff.toml"
 for f in $REQUIRED_FILES; do
   [ -f "$f" ] || { echo "MISSING: $f" >&2; rc=1; }
 done

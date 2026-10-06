@@ -1,151 +1,5 @@
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Panasonic 风扇控制台</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<!-- time 轴必需：Chart.js 4 的日期适配器，缺了会抛 "This method is not implemented: Check that a complete date adapter is provided" -->
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d1117;color:#c9d1d9;font:14px/1.5 -apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif;padding:20px}
-h1{font-size:20px;font-weight:600;margin-bottom:4px}
-.sub{color:#8b949e;font-size:13px;margin-bottom:20px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
-.card .k{color:#8b949e;font-size:12px;margin-bottom:6px}
-.card .v{font-size:26px;font-weight:600;font-variant-numeric:tabular-nums}
-.card .u{font-size:13px;color:#8b949e;margin-left:3px}
-.ok{color:#3fb950}.warn{color:#d29922}.bad{color:#f85149}
-.panel{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
-h2{font-size:14px;font-weight:600;margin-bottom:12px;color:#e6edf3}
-.lv{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:12px}
-button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:10px 4px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:.15s}
-button:hover{background:#30363d;border-color:#8b949e}
-button.on{background:#238636;border-color:#2ea043;color:#fff}
-button.on.auto{background:#1f6feb}
-.rows{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-@media(max-width:760px){.rows{grid-template-columns:1fr}.lv{grid-template-columns:repeat(3,1fr)}}
-.chartbox{height:220px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d}
-th{color:#8b949e;font-weight:500;font-size:12px}
-tr.hi{background:#132b1a}
-tr.hi td{color:#3fb950}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.bar{height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin-top:4px}
-.bar i{display:block;height:100%;background:#1f6feb}
-.mode{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.mode .st{font-weight:600;padding:3px 11px;border-radius:6px;font-size:13px}
-.mode .st.d{background:#1f6feb;color:#fff}
-.mode .st.m{background:#d29922;color:#1a1a1a}
-.mode .tx{color:#8b949e;font-size:13px;flex:1;min-width:200px}
-.tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;background:#21262d;color:#8b949e}
-.tag.g{background:#1a3d26;color:#3fb950}
-.hint{color:#8b949e;font-size:12px;margin-top:8px;line-height:1.7}
-code{background:#21262d;padding:1px 5px;border-radius:3px;font-size:12px}
-</style>
-</head>
-<body>
-<h1>Panasonic CFQV8 风扇控制台</h1>
-<div class="sub">ACPI <code>TFN1._FSL</code> 档位控制 · EC <code>0x76</code> 实时状态 · 数据源 <code>/sys/class/thermal/thermal_zone9</code></div>
+import { esc, fmtTemp } from "/pfan-core.js";
 
-<div class="mode">
-  <span class="st d" id="m-st">守护模式</span>
-  <span class="tx" id="m-tx">正在由 pfand 守护按温度曲线自动调档。手动改档会在 10 秒内被守护覆盖。</span>
-  <button onclick="setHold()" id="b-hold">接管（手动控制）</button>
-  <button onclick="setAuto()" id="b-auto2">交还守护</button>
-</div>
-
-<div class="cards">
-  <div class="card"><div class="k">CPU 温度</div><div class="v" id="c-temp">--<span class="u">°C</span></div>
-    <div class="bar"><i id="c-temp-bar" style="width:0"></i></div></div>
-  <div class="card"><div class="k">当前设定档位</div><div class="v" id="c-lvl">--<span class="u">%</span></div>
-    <div class="bar"><i id="c-lvl-bar" style="width:0;background:#3fb950"></i></div></div>
-  <div class="card"><div class="k">EC 实际状态</div><div class="v" id="c-ec">--<span class="u">%</span></div>
-    <div class="hint" id="c-ec-note">—</div></div>
-  <div class="card"><div class="k">估算转速</div><div class="v" id="c-rpm">--<span class="u">rpm</span></div>
-    <div class="hint" id="c-rpm-note">—</div></div>
-</div>
-
-<div class="panel">
-  <h2>温控曲线（pfand 分级骨架 + 细粒度微调）</h2>
-  <div class="rows">
-    <div>
-      <table id="cvtbl"><thead><tr><th>温度</th><th>档位</th><th>RPM</th><th>噪音dB</th><th>当前</th></tr></thead><tbody></tbody></table>
-      <div class="hint" id="cvparams"></div>
-    </div>
-    <div>
-      <div class="hint" style="margin-bottom:4px">
-        实测轨迹（每点 = 一次采样，横轴温度、纵轴档位；点云自己描出阶梯形状 = 曲线在真实工作）
-        <br><label style="cursor:pointer"><input type="checkbox" id="conly" checked>
-        只看<b>曲线实际管控中</b>的样本（排除切换曲线的 0 档、手动测试值）</label></div>
-      <div class="chartbox" style="height:250px"><canvas id="ch3"></canvas></div>
-    </div>
-  </div>
-</div>
-
-<div class="panel">
-  <h2>事件流（曲线切换 / 应急 / 看门狗）</h2>
-  <table id="ev"><thead><tr><th>时间</th><th>类型</th><th>内容</th></tr></thead><tbody></tbody></table>
-</div>
-
-<div class="panel">
-  <h2>风扇曲线（EC 0x79）— 比档位更根本</h2>
-  <div class="lv">
-    <button onclick="setCurve('quiet')" id="cv-quiet">quiet 固件曲线</button>
-    <button onclick="setCurve('s0i3')"  id="cv-s0i3">s0i3 中间档</button>
-    <button onclick="setCurve('cool')"  id="cv-cool">cool 性能曲线</button>
-    <button onclick="openEditor()"      id="cv-edit">⚙ 自定义曲线</button>
-    <button onclick="setCurve('auto')"  id="cv-auto">交还固件曲线</button>
-  </div>
-  <div class="hint" id="curve-note"></div>
-</div>
-
-<div class="panel" id="editor" style="display:none">
-  <h2>自定义曲线编辑器 <span class="tag" id="ed-src">/etc/pfand.conf</span></h2>
-  <div class="hint" style="margin-bottom:10px">
-    改完点「保存并重启守护」生效。温度必须<b>严格递增</b>，档位在 0~上限 之间。
-  </div>
-  <div class="rows">
-    <div>
-      <table id="edt"><thead><tr><th>温度上限 °C</th><th>档位 %</th><th>RPM</th><th>噪音dB</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div>
-      <table id="eda"><thead><tr><th>参数</th><th>值</th><th>说明</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
-  <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-    <button onclick="saveParams()" id="ed-save" style="background:#238636;border-color:#2ea043;color:#fff">保存并重启守护</button>
-    <button onclick="closeEditor()">取消</button>
-    <button onclick="resetParams()">恢复当前生效值</button>
-  </div>
-  <div class="hint" id="ed-msg" style="margin-top:8px"></div>
-</div>
-
-<div class="panel">
-  <h2>档位控制（ACPI _FSL）</h2>
-  <div class="lv" id="levels"></div>
-  <div class="hint">点任意档位 = 自动进入<b>接管模式</b>并锁定该档位；点「交还守护」恢复按温度自动调节。</div>
-</div>
-
-<div class="rows">
-  <div class="panel"><h2>温度 &amp; 档位（12h）</h2><div class="chartbox"><canvas id="ch1"></canvas></div></div>
-  <div class="panel"><h2>EC 实时风扇状态（0x76）</h2><div class="chartbox"><canvas id="ch2"></canvas></div></div>
-</div>
-
-<div class="rows">
-  <div class="panel"><h2>档位表（_FPS 官方数据）</h2>
-    <table id="fps"><thead><tr><th>档位%</th><th>RPM</th><th>噪音 mdB</th><th>功率 W</th></tr></thead><tbody></tbody></table>
-    <div class="hint">噪音值取自 <code>/sys/bus/acpi/devices/INT3404:00/state*</code> 第 4 字段。25% 比 100% 安静 37.5 dB。</div>
-  </div>
-  <div class="panel"><h2>最近采样</h2>
-    <table id="hist"><thead><tr><th>时间</th><th>温度</th><th>档位</th><th>EC</th></tr></thead><tbody></tbody></table>
-  </div>
-</div>
-
-<script>
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
 // 0 已移除：实测 _FSL 0 在 s0i3 下 = 风扇停转（2026-10-06），不允许从 UI 停扇
@@ -159,11 +13,10 @@ async function j(u,o){
   }
   const r=await fetch(u,o);return r.json();
 }
-function esc(s){return String(s==null?"":s)}
 
 function paint(d){
   cur=d.level; curLevel=d.level;
-  document.getElementById("c-temp").innerHTML=(d.temp==null?"--":d.temp)+'<span class="u">°C</span>';
+  document.getElementById("c-temp").innerHTML=fmtTemp(d.temp)+'<span class="u">°C</span>';
   document.getElementById("c-temp-bar").style.width=Math.min(100,(d.temp||0)/1.0)+"%";
   document.getElementById("c-temp-bar").style.background=d.temp>78?"#f85149":d.temp>65?"#d29922":"#1f6feb";
   document.getElementById("c-lvl").innerHTML=(d.level==null?"--":d.level)+'<span class="u">%</span>';
@@ -536,6 +389,3 @@ async function boot(){
   setInterval(()=>{if(window.CURVE)renderCurve(window.CURVE);},180000);
 }
 boot();
-</script>
-</body>
-</html>

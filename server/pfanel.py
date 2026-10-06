@@ -47,6 +47,8 @@ CURVES = {
     "quiet": 0x05,   # 固件静音曲线（社区实测 ~74°C 且震荡）
     "free":  None,   # 自由模式：停守护，档位完全由用户定（仍需 s0i3 才生效）
 }
+# 静态面板目录（部署路径，非硬件平台路径）。可用 PFAN_PANEL_DIR 覆盖以便测试/迁移。
+PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", "/opt/beszel/beszel_data")
 CURVE_FILE = "/var/lib/pfanel/curve.state"
 GUARD_TEMP = 82    # 看门狗阈值：quiet 下超过此温度自动回退（TjMax=100）
 
@@ -472,6 +474,21 @@ def history(hours=24, limit=2000, curve_only=False):
             for r in reversed(rows)]
 
 class H(http.server.BaseHTTPRequestHandler):
+    def _panel(self, name):
+        """读面板文件并注入 Token —— 占位符可能在 HTML，也可能在 app.js（拆分后在 JS）。"""
+        with open(os.path.join(PANEL_DIR, name), "rb") as fh:
+            data = fh.read()
+        if b"__PFAN_TOKEN__" in data:
+            data = data.replace(b"__PFAN_TOKEN__", get_token().encode())
+        return data
+
+    def _send_raw(self, data, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send(self, obj, code=200):
         b = json.dumps(obj).encode()
         self.send_response(code)
@@ -492,16 +509,23 @@ class H(http.server.BaseHTTPRequestHandler):
             elif p == "/api/history":
                 self._send(history(int(q.get("hours","24")),
                                    curve_only=q.get("curve")=="1"))
-            elif p == "/" or p == "/pfan":
+            elif p in ("/", "/pfan"):
                 try:
-                    html=open("/opt/beszel/beszel_data/pfan.html","rb").read().decode("utf-8")
-                    # 注入 Token：只有从本源拉页面的脚本才拿得到
-                    html=html.replace("__PFAN_TOKEN__", get_token())
-                    data=html.encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type","text/html; charset=utf-8")
-                    self.send_header("Content-Length",str(len(data)))
-                    self.end_headers(); self.wfile.write(data)
+                    # 注入 Token 在 _panel() 里完成：只有从本源拉页面的脚本才拿得到
+                    self._send_raw(self._panel("index.html"), "text/html; charset=utf-8")
+                except Exception as e:
+                    self._send({"error":str(e)},500)
+            elif p == "/pfan.css":
+                try:
+                    self._send_raw(self._panel("styles.css"), "text/css; charset=utf-8")
+                except Exception as e:
+                    self._send({"error":str(e)},500)
+            elif p in ("/pfan.js", "/pfan-core.js"):
+                # core.js 是纯逻辑模块，由 app.js import；app.js 顶层有副作用，不能被测试导入
+                name = "core.js" if p.endswith("-core.js") else "app.js"
+                try:
+                    self._send_raw(self._panel(name),
+                                   "application/javascript; charset=utf-8")
                 except Exception as e:
                     self._send({"error":str(e)},500)
             elif p == "/api/params":
