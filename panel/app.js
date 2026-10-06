@@ -1,4 +1,4 @@
-import { checkTempOrder, esc, fmtTemp } from "/pfan-core.js";
+import { checkTempOrder, dbOf, esc, fmtTemp, rpmOf } from "/pfan-core.js";
 
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
@@ -55,11 +55,13 @@ function paint(d){
       const bands=[["≤"+c.IDLE,c.L0],["≤"+c.T1,c.L1],["≤"+c.T2,c.L2],
                    ["≤"+c.T3,c.L3],["≤"+c.T4,c.L4],["≤"+c.T5,c.L5],
                    ["≥"+c.EMERG,c.E||100]];
-      const nz={25:3200,30:3800,40:5100,50:6300,60:7400,70:9300,100:12000};
+      // ②⑧ RPM/噪音必须来自权威表：旧的 nz 字面量缺 85/90/95（那几档显示 0），
+      // 噪音也用 lvl*0.5 硬算。window.FPS 由 boot() 从 /api/levels 填入。
+      const fps=window.FPS||{};
       tb='<table style="margin-top:8px;font-size:12px"><thead><tr><th>温度</th><th>档位</th><th>RPM</th><th>噪音dB</th><th></th></tr></thead><tbody>'
         +bands.map(([t,l])=>{
-            const lvl=parseInt(l), rpm=nz[lvl]||0;
-            const dB=(lvl===100?50:lvl*0.5).toFixed(1);
+            const lvl=parseInt(l,10), rpm=rpmOf(lvl,fps) ?? '—';
+            const dB=dbOf(lvl,fps) ?? '—';
             const note = lvl===c.L3?"听感甜点":lvl===c.L5?"上限":lvl===c.E?"应急":"";
             return `<tr><td>${t}°C</td><td><b>${l}%</b></td><td>${rpm}</td><td>${dB}</td><td style="color:#d29922">${note}</td></tr>`;
           }).join("")
@@ -369,6 +371,7 @@ async function saveParams(){
 async function boot(){
   buildLv();
   const lv=await j(API+"/api/levels");
+  window.FPS = lv.fps;   // 权威 _FPS 表，band 渲染的 rpmOf/dbOf 用它
   document.querySelector("#fps tbody").innerHTML=Object.entries(lv.fps).map(([k,v])=>
     `<tr><td>${k}%</td><td class="mono">${v[0]}</td><td class="mono">${v[1]}</td>
      <td class="mono">${(v[2]/1000).toFixed(2)}</td></tr>`).join("");

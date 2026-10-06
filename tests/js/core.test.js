@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { checkTempOrder, esc, fmtTemp } from "../../panel/core.js";
+import { checkTempOrder, dbOf, esc, fmtTemp, rpmOf } from "../../panel/core.js";
 
 // 与 /etc/pfand.conf 实测一致
 const CFG = {
@@ -34,4 +34,47 @@ describe("checkTempOrder（编辑器校验，preview() 调用）", () => {
   test("EMERG 必须高于 T5（否则应急形同虚设）", () =>
     expect(checkTempOrder([50, 56, 62, 67, 72, 79, 79])).toBeTruthy());
   test("长度不足 → 报错，不静默通过", () => expect(checkTempOrder([50, 56])).toBeTruthy());
+});
+
+// ---------------- ②⑥ / ②⑧ 前端侧：RPM 与噪音必须来自权威表 ----------------
+
+const FPS = {
+  25: [3200, 12500, 1250], 30: [3800, 15000, 1500], 40: [5100, 20000, 2000],
+  50: [6300, 25000, 2500], 60: [7400, 30000, 3000], 70: [9300, 35000, 3500],
+  80: [9800, 40000, 4000], 85: [10500, 42500, 4250], 90: [11200, 45000, 4500],
+  95: [11600, 47500, 4750], 100: [12000, 50000, 5000],
+};
+
+describe("nearestFpsEntry / rpmOf / dbOf（②⑧）", () => {
+  test("表外档位吸附到最近键，不返回 0/null", () => {
+    expect(rpmOf(42, FPS)).toBe(5100);          // 42 -> 40
+    expect(rpmOf(85, FPS)).toBe(10500);         // 旧 nz 表缺 85，曾显示 0
+    expect(rpmOf(95, FPS)).toBe(11600);         // 旧 nz 表缺 95，曾显示 0
+  });
+
+  test("标准档位直接命中", () => {
+    expect(rpmOf(25, FPS)).toBe(3200);
+    expect(rpmOf(100, FPS)).toBe(12000);
+  });
+
+  test("噪音取表里的 noise_mdB/1000，而不是 lvl*0.5 硬算", () => {
+    expect(dbOf(50, FPS)).toBe("25.0");
+    expect(dbOf(85, FPS)).toBe("42.5");
+  });
+
+  test("空值安全", () => {
+    expect(rpmOf(null, FPS)).toBe(null);
+    expect(rpmOf(undefined, null)).toBe(null);
+    expect(dbOf(null, FPS)).toBe(null);
+  });
+});
+
+describe("app.js 不再自带残缺 rpm 表（②⑧）", () => {
+  test("源码里没有字面量 nz={…}", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../panel/app.js", import.meta.url), "utf8");
+    expect(src).not.toMatch(/nz\s*=\s*\{/);
+    expect(src).toMatch(/import\s*\{[^}]*rpmOf/);
+    expect(src).toMatch(/import\s*\{[^}]*dbOf/);
+  });
 });

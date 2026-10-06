@@ -21,6 +21,7 @@ from pfan_core import (  # noqa: F401 (FPS/LEVELS 供 API 用)
     FPS,
     LEVELS,
     est_rpm,
+    nearest_fps,
     validate_params,
 )
 from pfan_platform import load as _plat_load
@@ -279,7 +280,7 @@ def snapshot(live=True):
             "gov": ("curve" if (get_curve() == "s0i3" and daemon_alive()) else
                     get_curve() if get_curve() != "auto" else
                     "daemon" if daemon_alive() else "manual"),
-            "fps": FPS.get(lvl) if lvl else None}
+            "fps": nearest_fps(lvl) if lvl else None}
     snap["cached"] = False
     snap["age"] = 0
     return snap
@@ -395,8 +396,8 @@ def write_params(d):
 def curve_view():
     """曲线视图：数据源 = /etc/pfand.conf（面板编辑的对象）"""
     cfg = read_params()
-    FPS = {25:3200, 30:3800, 40:5100, 50:6300, 60:7400, 70:9300,
-           80:9800, 100:12000}
+    # ②⑧ 这里曾自带一份只到 80/100、缺 85/90/95 的 rpm 表，与 pfan_core.FPS 分歧。
+    # 现在统一走 nearest_fps()：表只有一份，且表外档位也有值。
     bands = []
     if cfg:
         seq = [(cfg.get("IDLE"), cfg.get("L0"))]
@@ -407,9 +408,10 @@ def curve_view():
         for up, lvl in seq:
             if up is None or lvl is None:
                 continue
+            _f = nearest_fps(lvl)
             bands.append({"upto": up, "level": lvl,
-                          "rpm": FPS.get(lvl) or int(lvl * 120),
-                          "db": round(lvl * 0.5, 1),
+                          "rpm": _f[0] if _f else int(lvl * 120),
+                          "db": round(_f[1] / 1000.0, 1) if _f else round(lvl * 0.5, 1),
                           "emerg": lvl == cfg.get("E", 100)})
     return {"params": cfg, "bands": bands, "curve": get_curve()}
 

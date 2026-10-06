@@ -65,3 +65,27 @@ def test_est_rpm_capped_at_table_max():
     """backlog ⑪：EC 字节越界时不得算出超过表最大值的 RPM。"""
     v = est_rpm(0xFF)
     assert v is None or v <= 12000, f"est_rpm(255)={v} 超过 12000"
+
+
+# ---------------- ②⑥ / ②⑧：档位吸附到 _FPS 表 ----------------
+
+def test_nearest_fps_fills_table_gaps():
+    """②⑥：档位不在表里时不能返回 None —— 那是面板 rpm/fps 一栏变空的根因。"""
+    from pfan_core import FPS, nearest_fps
+    assert nearest_fps(25) == FPS[25]
+    assert nearest_fps(42) == FPS[40], "42 应吸附到 40"
+    assert nearest_fps(95) == FPS[95], "95 必须在表里（app.js 的 nz 表缺它）"
+    assert nearest_fps(100) == FPS[100]
+
+
+def test_nearest_fps_none_safe():
+    from pfan_core import nearest_fps
+    assert nearest_fps(None) is None
+
+
+def test_est_rpm_and_nearest_fps_agree():
+    """②⑧：两条路径必须同源，否则面板与守护会给出不同 RPM。"""
+    from pfan_core import FPS, est_rpm, nearest_fps
+    for lvl in (25, 40, 50, 70, 100):
+        assert nearest_fps(lvl)[0] == FPS[lvl][0]
+        assert est_rpm(lvl) == FPS[lvl][0], f"est_rpm({lvl}) 应等于表值"

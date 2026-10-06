@@ -158,3 +158,83 @@ def test_unauthorized_post_is_still_rejected():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ---------------- ②⑥ snapshot.fps / ②⑧ curve_view 表同源 ----------------
+
+_CURVE_CONF = """IDLE=50
+L0=25
+T1=56
+L1=30
+T2=62
+L2=40
+T3=67
+L3=50
+T4=72
+L4=60
+T5=79
+L5=70
+EMERG=80
+E=100
+EMERG_REL=75
+CAP=70
+TRIM=6
+GAIN=1
+HYST=3
+DWELL=30
+DEAD=2
+IV=10
+"""
+
+
+def test_snapshot_fps_not_null_for_valid_level():
+    """②⑥：level=42 这种表外档位，fps 曾返回 null → 面板 RPM/噪音列变空。"""
+    with open(os.environ["PFAN_CONF"], "w", encoding="utf-8") as fh:
+        fh.write(_CURVE_CONF)
+    # 预置假设备记住的档位为 42（表外值）。不预置的话假设备默认 0，
+    # 而 level=0 是 falsy，走 `if lvl` 分支照样返回 None —— 那是另一个 case，不是 ②⑥。
+    with open(os.environ["PFAN_DMESG_STATE"], "w", encoding="utf-8") as fh:
+        fh.write("42")
+    port = _free_port()
+    srv = _serve(port)
+    try:
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/now", timeout=15)
+        body = __import__("json").loads(r.read().decode())
+        assert body["level"] == 42, f"档位应为预置的 42，实际: {body['level']}"
+        assert body["fps"] is not None, f"②⑥: level=42 时 fps 仍为 null"
+        assert isinstance(body["fps"], list) and len(body["fps"]) == 3
+        import pfan_core
+        assert tuple(body["fps"]) == pfan_core.FPS[40], "42 应吸附到 40 档的表项"
+        # 注意 rpm 不在这里断言：它来自 EC 传感字节 est_rpm(ec76)，与档位无关，
+        # 而假设备给不出有意义的 ec76（这正是 ②⑥ 的 fps 与 rpm 本就不同源的体现）。
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_curve_view_uses_shared_fps_table():
+    """②⑧：curve_view 曾自带一份缺 85/90/95 的 rpm 表，与 pfan_core.FPS 分歧。"""
+    import pfan_core
+    with open(os.environ["PFAN_CONF"], "w", encoding="utf-8") as fh:
+        fh.write(_CURVE_CONF)
+    port = _free_port()
+    srv = _serve(port)
+    try:
+        r = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/curve", timeout=15)
+        cv = __import__("json").loads(r.read().decode())
+        bands = cv.get("bands") or []
+        assert bands, f"曲线 bands 为空: {cv}"
+        for b in bands:
+            lvl = b.get("level", b.get("lvl")) if isinstance(b, dict) else None
+            if lvl is None:
+                continue
+            rpm = b.get("rpm")
+            assert rpm == pfan_core.nearest_fps(lvl)[0], \
+                f"band level={lvl} rpm={rpm} 与 pfan_core.FPS 不一致"
+        # 直接断言表本身不再局部定义
+        import inspect
+        assert "FPS = {25:3200" not in inspect.getsource(pfanel.curve_view), \
+            "curve_view 仍在用局部 FPS 表"
+    finally:
+        srv.shutdown()
+        srv.server_close()

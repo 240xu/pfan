@@ -30,3 +30,25 @@ export function checkTempOrder(temps) {
   }
   return null;
 }
+
+/** 把档位吸附到 _FPS 表里最近的键。表外档位是常态（_FSL 允许 1..120），不是异常。
+ *  ②⑥：旧实现 FPS.get(lvl) 对 42/85/95 返回 null/undefined，面板那一列就空了。 */
+export function nearestFpsEntry(level, fps) {
+  if (level == null || !fps) return null;
+  const keys = Object.keys(fps).map(Number);
+  if (!keys.length) return null;
+  const near = keys.reduce((a, b) => (Math.abs(b - level) < Math.abs(a - level) ? b : a));
+  return fps[near] ?? null;
+}
+
+/** 档位 -> RPM。②⑧：app.js 曾自带一份缺 85/90/95 的 nz 表，那几档显示 0。 */
+export function rpmOf(level, fps) {
+  const e = nearestFpsEntry(level, fps);
+  return e ? e[0] : null;
+}
+
+/** 档位 -> 噪音 dB（表里是 noise_mdB，除以 1000）。不再用 lvl*0.5 硬算。 */
+export function dbOf(level, fps) {
+  const e = nearestFpsEntry(level, fps);
+  return e ? (e[1] / 1000).toFixed(1) : null;
+}

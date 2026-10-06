@@ -65,6 +65,19 @@ def validate_params(d):
     return errs
 
 
+def nearest_fps(level):
+    """档位 -> (rpm, noise_mdB, power_mW)，表外档位吸附到最近的键。
+
+    ②⑥ 修的就是这里：旧实现是 `FPS.get(lvl)`，档位 42/85/95 这种不在表里的值
+    直接返回 None，面板的 RPM/噪音列就变空；而 _FSL 允许 1..120 任意整数，
+    所以"表外"才是常态而不是异常。
+    """
+    if level is None or not FPS:
+        return None
+    key = min(FPS, key=lambda k: abs(k - level))
+    return FPS[key]
+
+
 def est_rpm(byte1):
     """把 EC 状态字节换算成近似 RPM（对齐 _FPS 表），结果封顶在表最大值。
 
