@@ -616,7 +616,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 if __name__ == "__main__":
+    # 测试接缝：缺省 8789 与生产一致（test_pfand_loop.sh T0 断言）
+    _PORT = int(os.environ.get("PFAN_PORT", "8789"))
     threading.Thread(target=collector, daemon=True).start()
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.ThreadingTCPServer(("0.0.0.0", 8789), H) as s:
+    with socketserver.ThreadingTCPServer(("0.0.0.0", _PORT), H) as s:
         s.serve_forever()

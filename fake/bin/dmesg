@@ -1,0 +1,30 @@
+#!/bin/sh
+# 伪 dmesg：把假设备上【最后一次 ACPI 请求】翻译成 pfanctl 的 RESULT 行。
+#
+# 必须与真驱动语义一致的三点：
+#   1) 行格式 `pfanctl: RESULT [0,<level>,4294967295]`（实机抓到的形状）；
+#   2) 时间戳单调递增 —— pfand 用它判定"有没有新结果"，不递增会永远等不到；
+#   3) 请求是 _FSL 1 N 就记住档位，请求是 _FST 就按记住的档位作答。
+#
+# 用 #!/bin/sh 而非 bash：本脚本被 pfand 直接 exec，而 Termux 没有 /bin/bash、
+# 也没有 /usr/bin/env（发行版才有）。只用 POSIX 特性。
+#
+# 环境：PFAN_DEV（假设备文件）、PFAN_DMESG_STATE（记住的档位）、PFAN_DMESG_LOG（请求流水）
+set -u
+[ -n "${PFAN_DEV:-}" ]         || { echo "fake dmesg: 缺 PFAN_DEV" >&2; exit 1; }
+[ -n "${PFAN_DMESG_STATE:-}" ] || { echo "fake dmesg: 缺 PFAN_DMESG_STATE" >&2; exit 1; }
+[ -n "${PFAN_DMESG_LOG:-}" ]   || { echo "fake dmesg: 缺 PFAN_DMESG_LOG" >&2; exit 1; }
+
+CNT=$(cat "$PFAN_DMESG_LOG.cnt" 2>/dev/null || echo 0)
+CNT=$((CNT + 1))
+echo "$CNT" > "$PFAN_DMESG_LOG.cnt"
+
+req=$(tail -n 1 "$PFAN_DEV" 2>/dev/null || true)
+[ -n "$req" ] && echo "$req" >> "$PFAN_DMESG_LOG"
+
+case "$req" in
+  *"_FSL 1 "*) lvl=${req##* }; echo "$lvl" > "$PFAN_DMESG_STATE" ;;
+esac
+
+lvl=$(cat "$PFAN_DMESG_STATE" 2>/dev/null || echo 0)
+echo "[${CNT}.000000] pfanctl: RESULT [0,${lvl},4294967295]"

@@ -25,7 +25,14 @@ need_F(){   # 懒加载：detect 不需要 F（新机器上 platform.conf 还不
   [ -n "$F" ] || { echo "pfan: platform.conf 缺 FAN_DEVICE —— 先跑: pfan detect --write /etc/pfan/platform.conf" >&2; return 1; }
 }
 
-need_dev(){ [ -c "$DEV" ] || { echo "pfan: $DEV 非设备节点，先 insmod /opt/pfanctl/pfanctl.ko" >&2; return 1; }; }
+need_dev(){
+  # 显式设置 PFAN_DEV 时只查存在性（假设备是普通文件），否则必须是字符设备。
+  if [ -n "${PFAN_DEV:-}" ]; then
+    [ -e "$DEV" ] || { echo "pfan: PFAN_DEV=$DEV 不存在" >&2; return 1; }
+  else
+    [ -c "$DEV" ] || { echo "pfan: $DEV 非设备节点，先 insmod /opt/pfanctl/pfanctl.ko" >&2; return 1; }
+  fi
+}
 
 # 拿锁 + 设备。任一失败即退出（不许降级继续读旧值）。
 acquire(){

@@ -44,6 +44,14 @@ CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 [ -f "$CAND" ] || CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
 # 测试接缝，语义同 pfan
 DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
+# 这三个接缝的【缺省值必须等于生产值】—— tests/shell/test_pfand_loop.sh 的 T0 会断言。
+# 用它们是为了让守护能在没有内核模块/没有 root 的开发机上被真正跑起来。
+DMESG="${PFAN_DMESG:-dmesg}"
+CONF="${PFAN_CONF:-/etc/pfand.conf}"
+CURVE_FILE="${PFAN_CURVE_FILE:-/var/lib/pfanel/curve.state}"
+# 设备判定：生产要求字符设备（模块没加载就该 fail-safe）；
+# 显式设置了 PFAN_DEV 则只查存在性 —— 假设备是普通文件。
+dev_ok(){ if [ -n "${PFAN_DEV:-}" ]; then [ -e "$1" ]; else [ -c "$1" ]; fi; }
 F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
 Z=$(pfan_plat THERMAL_ZONE 2>/dev/null) || Z=""
 # EC 根是【另一条】路径：EC88 写 EC 寄存器必须挂在 EC 根下，不是挂在风扇设备下。
@@ -78,7 +86,7 @@ fi
 # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁，
 #    否则读到别人刚写的 RESULT（2026-10-05 审计）。
 exec 9>"$LOCK"
-if [ -z "$DEV" ] || [ ! -c "$DEV" ]; then
+if [ -z "$DEV" ] || ! dev_ok "$DEV"; then
   log "设备 $DEV 不可用 -> fail-safe 尝试满速"
   flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
   exit 1
@@ -93,14 +101,14 @@ getL(){
     # 时间戳判定（不是行数）：dmesg 环形缓冲会淘汰旧行，行数会下降
     # awk -F'[][]' 拆第二段即可拿到时间戳；sed 需要数字紧跟 [，
     # 而 dmesg 在秒数不足 5 位时会补空格（如 "[  862.946343]"），会导致匹配失败
-    before=$(dmesg 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+    before=$("$DMESG" 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
     echo "$F._FST" > "$DEV" 2>/dev/null
     for _ in $(seq 1 20); do
         sleep 0.12
-        after=$(dmesg 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+        after=$("$DMESG" 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
         if [ -n "$after" ] && [ -n "$before" ] && \
            awk -v a="$after" -v b="$before" 'BEGIN{exit !(a>b)}'; then
-            d=$(dmesg 2>/dev/null | grep -oE "RESULT \[[0-9]+,[0-9]+" | tail -1)
+            d=$("$DMESG" 2>/dev/null | grep -oE "RESULT \[[0-9]+,[0-9]+" | tail -1)
             [ -n "$d" ] && found="${d##*,}"
             break
         fi
@@ -112,11 +120,10 @@ getL(){
 }
 setL(){ flock -x 9; echo "$F._FSL 1 $1" > "$DEV" 2>/dev/null; flock -u 9; }
 # 载入曲线参数（面板通过改 /etc/pfand.conf 调整；缺失时用脚本内默认值兜底）
-[ -r /etc/pfand.conf ] && . /etc/pfand.conf
+[ -r "$CONF" ] && . "$CONF"
 
 # ⑧ 只有 s0i3 模式才该由本守护接管。旧实现无条件 ensure_s0i3()，会把用户选的
 #    quiet/cool 静默改成 s0i3（set_curve("auto") 也会 restart pfand 触发）。
-CURVE_FILE=/var/lib/pfanel/curve.state
 CURVE=$(python3 -c "import json;print(json.load(open('$CURVE_FILE'))['curve'])" 2>/dev/null || echo auto)
 if [ "$CURVE" != "s0i3" ]; then
     log "当前曲线=$CURVE (非 s0i3)，pfand 不接管，正常退出"
@@ -197,7 +204,7 @@ readT(){
     esac
 }
 readT
-log "[参数来源 /etc/pfand.conf] 骨架 ${L0}/${L1}/${L2}/${L3}/${L4}/${L5} 应急${EMERG}/${E} 微调±${TRIM}(${GAIN}/C) 上限${CAP} 死区${HYST}C 驻留${DWELL}s 输出死区${DEAD} 采样${IV}s"
+log "[参数来源 $CONF] 骨架 ${L0}/${L1}/${L2}/${L3}/${L4}/${L5} 应急${EMERG}/${E} 微调±${TRIM}(${GAIN}/C) 上限${CAP} 死区${HYST}C 驻留${DWELL}s 输出死区${DEAD} 采样${IV}s"
 ensure_s0i3
 
 written=$(getL)
