@@ -11,6 +11,7 @@ import re
 import socketserver
 import sqlite3
 import subprocess
+import sys as _sys
 import threading
 import time
 
@@ -22,17 +23,17 @@ from pfan_core import (  # noqa: F401 (FPS/LEVELS 供 API 用)
     est_rpm,
     validate_params,
 )
-from pfan_platform import REPO_EXAMPLE as _PLAT_FALLBACK
 from pfan_platform import load as _plat_load
 
 try:
     _PLAT = _plat_load()
 except OSError as _e:
-    # 回退到仓库内的 example 只为让进程能起来看日志；必须显式记录，不许静默。
-    import sys
-    print(f"pfanel: 读不到平台配置 ({_e})，回退 example —— 生产环境应立刻 pfan detect",
-          file=sys.stderr, flush=True)
-    _PLAT = _plat_load(_PLAT_FALLBACK)
+    # 不做 example 回退：example 的热区/ACPI 路径未必属于本机，
+    # 拿它跑起来会【按错误的温度源驱动风扇】—— 比起不来更糟。
+    # 快速失败 + 可操作的提示（不打 traceback），systemd 会按 Restart=always 重试。
+    print(f"pfanel: 读不到平台配置 ({_e}) —— 请执行: pfan detect --write /etc/pfan/platform.conf",
+          file=_sys.stderr, flush=True)
+    raise SystemExit(1) from None
 
 EC   = _PLAT["EC_ROOT"]            # EC 根，形如 _SB.<bus>.LPCB.EC0
 FAN  = _PLAT["FAN_DEVICE"]         # 风扇设备；可能与 EC 不同子树（见候选清单）

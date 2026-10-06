@@ -29,8 +29,8 @@ DWELL=30            # 调档最小间隔 s
 DEAD=2              # 输出死区：与当前值差 <DEAD 不写
 IV=10
 
-LOCK=/run/pfanel.lock
-LOG=/var/log/pfand.log
+LOCK="${PFAN_LOCK:-/run/pfanel.lock}"
+LOG="${PFAN_LOG:-/var/log/pfand.log}"
 log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 
 # 平台配置：路径一律来自 platform.conf，本文件不再硬编码 ACPI/热区路径。
@@ -42,36 +42,46 @@ _plat_sh="${PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh}"
 if [ -f "$_plat_sh" ]; then . "$_plat_sh"; fi
 CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 [ -f "$CAND" ] || CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
-DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
+# 测试接缝，语义同 pfan
+DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
 F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
 Z=$(pfan_plat THERMAL_ZONE 2>/dev/null) || Z=""
+# EC 根是【另一条】路径：EC88 写 EC 寄存器必须挂在 EC 根下，不是挂在风扇设备下。
+# 旧代码用 $F.EC88 拼出 ...TFN1.EC88，实测 get_handle 恒返回 AE_NOT_FOUND(5)。
+EC=$(pfan_plat EC_ROOT 2>/dev/null) || EC=""
 # PFAN_PROBE=1: 只解析并打印平台路径就退出（测试用；生产绝不设置）。
 # 放在 fail-safe 之前，测试才能观察到"解析为空"这种失败形态。
 if [ "${PFAN_PROBE:-0}" = 1 ]; then
-  printf 'FAN_DEVICE=%s\nTHERMAL_ZONE=%s\nDEV=%s\nCANDIDATES=%s\nLOADER=%s\n' \
-    "$F" "$Z" "$DEV" "$CAND" "$_plat_sh"
+  printf 'FAN_DEVICE=%s\nTHERMAL_ZONE=%s\nEC_ROOT=%s\nDEV=%s\nCANDIDATES=%s\nLOADER=%s\n' \
+    "$F" "$Z" "$EC" "$DEV" "$CAND" "$_plat_sh"
   exit 0
 fi
-if ! command -v pfan_plat >/dev/null 2>&1 || [ -z "$F" ] || [ -z "$Z" ]; then
+if ! command -v pfan_plat >/dev/null 2>&1 || [ -z "$F" ] || [ -z "$Z" ] || [ -z "$EC" ]; then
   # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁
   exec 9>"$LOCK" 2>/dev/null
-  log "平台配置不可用(F='$F' Z='$Z', 加载器 '$_plat_sh') -> fail-safe 满速 100% 并退出（先跑 pfan detect）"
+  log "平台配置不可用(F='$F' Z='$Z' EC='$EC', 加载器 '$_plat_sh') -> fail-safe 满速 100%（先跑 pfan detect）"
   # F 未知时对候选清单里的每个风扇设备都写 100%：哪个能解析哪个生效
+  _wrote=0
   if [ -r "$CAND" ]; then
     while read -r _ec _fan; do
       [ -n "$_fan" ] || continue
-      flock -x 9 2>/dev/null; echo "$_fan._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9 2>/dev/null
+      flock -x 9 2>/dev/null && { echo "$_fan._FSL 1 100" > "$DEV" 2>/dev/null && _wrote=1; flock -u 9 2>/dev/null; }
     done < <(grep -vE '^#|^$' "$CAND")
+  else
+    log "候选清单不可读: '$CAND' —— fail-safe 无法写入任何候选"
   fi
-  exit 0
+  [ "$_wrote" = 1 ] && log "fail-safe 已写满速（候选清单）" || log "fail-safe 写入失败（DEV='$DEV' 不可用？）"
+  # 必须非零退出：Restart=on-failure 才会每 15s 重试，
+  # 等 platform.conf 修好后自动接管；exit 0 会让守护就此死掉、无人再写 100%。
+  exit 1
 fi
 # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁，
 #    否则读到别人刚写的 RESULT（2026-10-05 审计）。
 exec 9>"$LOCK"
 if [ -z "$DEV" ] || [ ! -c "$DEV" ]; then
-  log "设备 $DEV 不可用 -> fail-safe 满速并退出"
+  log "设备 $DEV 不可用 -> fail-safe 尝试满速"
   flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
-  exit 0
+  exit 1
 fi
 LOG=${PFAN_LOG:-/var/log/pfand.log}
 
@@ -140,7 +150,7 @@ fi
 ensure_s0i3(){
     flock -x 9
     echo "$F._FSL 1 0" > "$DEV" 2>/dev/null; sleep 0.3
-    echo "$F.EC88 4 181 0x79 0x02 0" > "$DEV" 2>/dev/null
+    echo "$EC.EC88 4 181 0x79 0x02 0" > "$DEV" 2>/dev/null
     flock -u 9
     sleep 0.3
 }

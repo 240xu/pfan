@@ -110,3 +110,25 @@ fi
 
 printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"
 exit "$rc"
+
+printf '\n=== 6. 平台配置（事故根因那份文件，必须存在且完整）===\n'
+PC=$(remote 'sudo -n cat /etc/pfan/platform.conf 2>/dev/null' || true)
+if [ -z "$PC" ]; then
+  bad "/etc/pfan/platform.conf 读不到 —— pfand/pfanel 会 fail-safe（就是 2026-10-06 那次事故的起因）"
+else
+  for k in EC_ROOT FAN_DEVICE THERMAL_ZONE DEV EC_CMD; do
+    if echo "$PC" | grep -qE "^$k=\\S+"; then ok "$k 有值"; else bad "$k 缺失或为空"; fi
+  done
+  TZP=$(echo "$PC" | sed -n 's/^THERMAL_ZONE=//p' | head -1)
+  if [ -n "$TZP" ] && [ -r "$TZP" ]; then ok "热区文件可读: $TZP"
+  elif [ -n "$TZP" ]; then
+    # pfan 可能没有该路径权限，用 sudo 复核
+    if remote "[ -r '$TZP' ]" 2>/dev/null; then ok "热区文件可读(需root): $TZP"
+    else bad "热区文件不可读: $TZP"; fi
+  else bad "THERMAL_ZONE 为空"; fi
+fi
+if remote 'sudo -n test -s /etc/pfan/fan-candidates.txt' 2>/dev/null; then
+  ok "候选清单存在非空"
+else
+  bad "/etc/pfan/fan-candidates.txt 缺失 —— fail-safe 无候选可写"
+fi

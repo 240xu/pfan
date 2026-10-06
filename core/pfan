@@ -14,8 +14,10 @@ fi
 # 本文件不再出现具体 ACPI 路径 —— 唯一例外是候选清单，它在 platform/fan-candidates.txt。
 PLAT_CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 [ -f "$PLAT_CAND" ] || PLAT_CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
-DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
-LOCK=/run/pfanel.lock
+# 测试接缝：真实控制路径需要 /dev/pfanctl 与 /run/pfanel.lock（都要 root），
+# 单测用 PFAN_DEV=/dev/null + PFAN_LOCK=<临时文件> 覆盖。生产从不设置。
+DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
+LOCK="${PFAN_LOCK:-/run/pfanel.lock}"
 F=""
 need_F(){   # 懒加载：detect 不需要 F（新机器上 platform.conf 还不存在）
   [ -n "$F" ] && return 0
@@ -130,12 +132,22 @@ case "$1" in
           case "$L" in
             ''|*[!0-9]*) echo "档位必须是 1..120 的整数" >&2; exit 2 ;;
           esac
+          # 前导零必须拒：pfanctl.c 用 simple_strtol(...,0)（base 0），
+          # "080" 会被当八进制解析成 0 -> _FSL(0) -> 风扇停转，绕过上面的禁 0。
+          case "$L" in
+            0*) echo "档位必须在 1..120（0 被禁；前导零会被内核按八进制解析，080 会变成 0）" >&2; exit 2 ;;
+          esac
           [ "$L" -ge 1 ] && [ "$L" -le 120 ] || {
             echo "档位必须在 1..120（0 被禁：实测 _FSL 0 = 风扇停转）" >&2; exit 2; }
           need_F || exit 1
           acquire
-          echo "$F._FSL 1 $L" > $DEV; sleep 0.6
-          echo "已设 ${L}% -> 当前 $(pfan get)" ;;
+          echo "$F._FSL 1 $L" > "$DEV"; sleep 0.6
+          # 读回必须在【进程内】用 run，绝不能 $(pfan get)：
+          # 子进程会 exec 8> 重开锁文件得到新的 open file description，然后 flock -x 8
+          # 与持锁的父进程互等 -> 永久死锁，连带锁住 pfand 与 pfanel（复审 C1，2026-10-06 实测）。
+          rb=$(run "$F._FST" | sed 's/.*RESULT //')
+          flock -u 8 2>/dev/null || true
+          echo "已设 ${L}% -> 当前 ${rb:-<读回失败>}" ;;
   sensors) need_F || exit 1; acquire; run "\_SB_.PTID.OSDL" | sed 's/.*RESULT //' ;;
   list)   echo "档位: 1..120 任意整数（0 被禁：实测 _FSL 0 = 风扇停转）" ;;
   *)      echo "用法: pfan {detect [--write <file>]|get|set <档位>|list|sensors}"; exit 1 ;;
