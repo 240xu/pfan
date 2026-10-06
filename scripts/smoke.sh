@@ -72,6 +72,17 @@ printf '\n=== 3. 公网入口 ===\n'
 code=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://pfan.example.com/pfan 2>/dev/null || echo 000)
 if [ "$code" = 200 ]; then ok "pfan.example.com/pfan = 200"; else bad "公网入口 = $code"; fi
 
+printf '\n=== 3b. 静态路由（拆分后的面板资源）===\n'
+for u in /pfan.css /pfan.js /pfan-core.js; do
+  c=$(timeout 20 curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "$API$u" 2>/dev/null || echo 000)
+  if [ "$c" = 200 ]; then ok "$u = 200"; else bad "$u = ${c:0:3}（未部署？pfanel 仍是旧版）"; fi
+done
+# Content-Type 必须正确，否则浏览器按 HTML 解析 JS/CSS 导致面板白屏
+ct=$(timeout 20 curl -sS -o /dev/null -w '%{content_type}' --max-time 12 "$API/pfan.css" 2>/dev/null || echo "")
+case "$ct" in *text/css*) ok "Content-Type text/css" ;; *) bad "Content-Type: '$ct' (期望 text/css)" ;; esac
+ct=$(timeout 20 curl -sS -o /dev/null -w '%{content_type}' --max-time 12 "$API/pfan.js" 2>/dev/null || echo "")
+case "$ct" in *javascript*) ok "Content-Type javascript" ;; *) bad "Content-Type: '$ct' (期望 javascript)" ;; esac
+
 printf '\n=== 4. 曲线参数权威源一致（repo vs 目标机 /etc/pfand.conf）===\n'
 if remote 'sudo -n sha256sum /etc/pfand.conf' > "$CACHE/live.sha" 2>/dev/null && [ -s "$CACHE/live.sha" ]; then
   LIVE=$(awk '{print $1}' "$CACHE/live.sha")

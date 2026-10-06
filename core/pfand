@@ -37,11 +37,21 @@ log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 # 缺失即 fail-safe —— 绝不带错误路径空转（会把风扇交给一个读不到温度的控制律）。
 _plat_sh="${PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh}"
 [ -f "$_plat_sh" ] || _plat_sh="$(dirname "$0")/platform.sh"
+# 关键：解析出路径后必须真的 source 它，否则 pfan_plat 未定义，
+# 下面所有 $(pfan_plat ...) 都会静默变成空串（2026-10-06 实测导致风扇停转）。
+if [ -f "$_plat_sh" ]; then . "$_plat_sh"; fi
 CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 [ -f "$CAND" ] || CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
 DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
 F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
 Z=$(pfan_plat THERMAL_ZONE 2>/dev/null) || Z=""
+# PFAN_PROBE=1: 只解析并打印平台路径就退出（测试用；生产绝不设置）。
+# 放在 fail-safe 之前，测试才能观察到"解析为空"这种失败形态。
+if [ "${PFAN_PROBE:-0}" = 1 ]; then
+  printf 'FAN_DEVICE=%s\nTHERMAL_ZONE=%s\nDEV=%s\nCANDIDATES=%s\nLOADER=%s\n' \
+    "$F" "$Z" "$DEV" "$CAND" "$_plat_sh"
+  exit 0
+fi
 if ! command -v pfan_plat >/dev/null 2>&1 || [ -z "$F" ] || [ -z "$Z" ]; then
   # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁
   exec 9>"$LOCK" 2>/dev/null
