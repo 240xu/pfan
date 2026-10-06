@@ -42,6 +42,18 @@ static int dump_obj(union acpi_object *o, char *out, int maxlen, int level)
 	return len;
 }
 
+/* 参数解析：只有 0x/0X/0b/0B 前缀才走 base 0，其余一律十进制。
+ * 用 base 0 的后果是 "080" 被当成八进制读 —— '8' 不是八进制数字，就地截断成 0，
+ * _FSL 收到 0 => 风扇停转，而用户明明写的是 80（2026-10-06 复审 I1 实测）。
+ * 但 EC88 的 0x79 / 0x02 必须仍按十六进制解析，所以不能一刀切改成十进制。 */
+static long pfan_parse(const char *s, char **endp)
+{
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X' ||
+			    s[1] == 'b' || s[1] == 'B'))
+		return simple_strtol(s, endp, 0);
+	return simple_strtol(s, endp, 10);
+}
+
 static int pfan_eval(const char *path, int argc, long *av)
 {
 	acpi_handle handle = NULL;
@@ -49,7 +61,6 @@ static int pfan_eval(const char *path, int argc, long *av)
 	struct acpi_buffer res;
 	struct acpi_object_list arglist;
 	union acpi_object objs[4];
-	union acpi_object *o;
 	char *out;
 	int i;
 
@@ -61,22 +72,25 @@ static int pfan_eval(const char *path, int argc, long *av)
 	arglist.count = (u32)argc; arglist.pointer = objs;
 	res.length = ACPI_ALLOCATE_BUFFER; res.pointer = NULL;
 	st = acpi_evaluate_object(handle, NULL, &arglist, &res);
-	pr_info("pfanctl: %s argc=%d st=%x len=%u\n", path, argc, st, (unsigned)res.length);
+	/* ⑭ 这条是 dmesg 里绝大多数噪音的来源（每次 ACPI 调用一行）。
+	 * 消费者只依赖下面的 RESULT 行，所以降为 pr_debug。 */
+	pr_debug("pfanctl: %s argc=%d st=%x len=%u\n", path, argc, st, (unsigned)res.length);
 	if (!ACPI_SUCCESS(st) || !res.pointer) { if (res.pointer) kfree(res.pointer); return 0; }
 
-	if (res.length == ACPI_TYPE_INTEGER) {
-		pr_info("pfanctl: RESULT int=%lld\n", (long long)*(acpi_integer *)res.pointer);
-		kfree(res.pointer); return 0;
-	}
-	if (res.length == ACPI_ALLOCATE_BUFFER) {
-		pr_info("pfanctl: RESULT void\n"); kfree(res.pointer); return 0;
-	}
+	/* res.length 是【字节长度】，不是对象类型。旧代码曾拿它与 ACPI_TYPE_INTEGER /
+	 * ACPI_ALLOCATE_BUFFER 比较 —— 求值成功后这两个分支永远不会进入（死分支），
+	 * 而且它们之外的 kfree 也在分支里，小结果会既不打印也不释放。
+	 * 现在统一走 dump_obj，释放放到分支之外。 */
 	if (res.length > 8 && res.length <= 65536) {
-		o = (union acpi_object *)res.pointer;
 		out = kmalloc(8192, GFP_KERNEL);
-		if (out) { *out = 0; dump_obj(o, out, 8192, 0); pr_info("pfanctl: RESULT %s\n", out); kfree(out); }
-		kfree(res.pointer);
+		if (out) {
+			*out = 0;
+			dump_obj((union acpi_object *)res.pointer, out, 8192, 0);
+			pr_info("pfanctl: RESULT %s\n", out);
+			kfree(out);
+		}
 	}
+	kfree(res.pointer);
 	return 0;
 }
 
@@ -89,10 +103,10 @@ static ssize_t pfan_write(struct file *f, const char __user *buf, size_t n, loff
 	if (copy_from_user(kbuf, buf, n)) return -EFAULT;
 	kbuf[n] = 0; strim(kbuf);
 	p2 = strchr(kbuf, 0x20);
-	if (p2) { *p2 = 0; p2++; argc = (int)simple_strtol(p2, NULL, 0);
+	if (p2) { *p2 = 0; p2++; argc = (int)pfan_parse(p2, NULL);
 		p3 = strchr(p2, 0x20);
 		if (p3) { *p3 = 0; p2 = p3 + 1;
-			for (i = 0; i < 4 && p2; i++) { a[i] = simple_strtol(p2, &p2, 0);
+			for (i = 0; i < 4 && p2; i++) { a[i] = pfan_parse(p2, &p2);
 				if (!p2) break; p2 = strchr(p2, 0x20); if (p2) p2++; } } }
 	/* 便捷语法: "ec88 0x76" -> 展开为完整 EC88 调用 */
 	if (strncmp(kbuf, "ec88", 4) == 0) {
@@ -107,7 +121,7 @@ static ssize_t pfan_write(struct file *f, const char __user *buf, size_t n, loff
 			int na = 0;
 			if (q) { *q = 0; q++;
 				while (q && na < 4) {
-					av[na++] = simple_strtol(q, &q, 0);
+					av[na++] = pfan_parse(q, &q);
 					if (!q) break;
 					q = strchr(q, 0x20);
 					if (q) q++;

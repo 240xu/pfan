@@ -57,3 +57,36 @@ curl -fsS http://<host>:8789/api/now | jq .
 3. `server/pfanel.py` 的 Origin 白名单已配置化（backlog ②⑤），不再硬编码 IP
 
 在上述三条未全部满足前，**不得**把仓库改为 public。
+
+## 内核模块 `pfanctl.ko` 的重建与重载
+
+**构建**（`/opt/pfanctl/Makefile` 只是 kbuild 片段，不能直接 `make`）：
+
+```bash
+cd /opt/pfanctl
+sudo make -C /lib/modules/$(uname -r)/build M=/opt/pfanctl modules
+```
+
+**重载**（改了 `.c` 之后）：
+
+```bash
+sudo rm -f /dev/pfanctl      # ← 必须先删，见下方事故
+sudo rmmod pfanctl
+sudo insmod /opt/pfanctl/pfanctl.ko
+test -c /dev/pfanctl && echo OK      # 必须是字符设备
+```
+
+> ⚠️ **`rmmod` 会摘掉 `/dev/pfanctl` 节点。在模块不在位期间，任何
+> `echo ... > /dev/pfanctl` 都会把它创建成【普通文件】**，随后 `insmod` 的
+> `misc_register` 看到路径已存在就不会覆盖 —— 此后**所有风扇读写都被静默写进这个
+> 普通文件，控制完全失效，且不报任何错**。
+>
+> 2026-10-06 14:31–14:33 实际踩中：控制丢失约 2 分钟，风扇保持在失效前的 50%，
+> CPU 峰值约 70°C（应急线 80°C，无热风险）。是 pfand 的**对账**抓出来的：
+> `对账: written=30 -> 实际=50 (外部改档或写入未生效)`。
+>
+> 恢复：`rm -f /dev/pfanctl` + 重载即可（devtmpfs 会重建字符设备）。
+>
+> **自检**：`stat -c %F /dev/pfanctl` 必须输出 `character special file`。
+
+**回滚点**：`/root/backups/pfanctl-build-20261006-142743/{pfanctl.c,pfanctl.ko}`（重载前的原件）
