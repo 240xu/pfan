@@ -4,9 +4,24 @@
 # 结构说明：设备节点与锁的获取【按命令】做，不再无条件前置。
 #   detect 不碰 /dev/pfanctl（除非走真实 ACPI 探测），也不需要锁；
 #   get/set/sensors 才需要 —— 而且锁失败必须中止，否则会读到陈旧 dmesg 值（backlog ②④）。
-F="\_SB.PCI0.LPCB.EC0.TFN1"
-DEV=/dev/pfanctl
+# 平台加载器（bash 侧）。找不到即中止 —— 不允许带未定义的路径继续。
+_plat_sh="${PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh}"
+[ -f "$_plat_sh" ] || _plat_sh="$(dirname "$0")/platform.sh"
+if ! . "$_plat_sh" 2>/dev/null || ! command -v pfan_plat >/dev/null 2>&1; then
+  echo "pfan: 读不到平台加载器 $_plat_sh" >&2; exit 1
+fi
+# 路径一律来自 platform.conf（THERMAL_ZONE/EC_ROOT/FAN_DEVICE/DEV），
+# 本文件不再出现具体 ACPI 路径 —— 唯一例外是候选清单，它在 platform/fan-candidates.txt。
+PLAT_CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
+[ -f "$PLAT_CAND" ] || PLAT_CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
+DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
 LOCK=/run/pfanel.lock
+F=""
+need_F(){   # 懒加载：detect 不需要 F（新机器上 platform.conf 还不存在）
+  [ -n "$F" ] && return 0
+  F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
+  [ -n "$F" ] || { echo "pfan: platform.conf 缺 FAN_DEVICE —— 先跑: pfan detect --write /etc/pfan/platform.conf" >&2; return 1; }
+}
 
 need_dev(){ [ -c "$DEV" ] || { echo "pfan: $DEV 非设备节点，先 insmod /opt/pfanctl/pfanctl.ko" >&2; return 1; }; }
 
@@ -70,10 +85,15 @@ detect(){
        printf '  %s\n' "${zs[@]}" >&2; return 4 ;;
   esac
 
-  # ACPI 候选是【成对】的：EC 根 与 风扇设备 可能不在同一子树
-  # （社区机型存在风扇位于 \_SB.IETM.TFN1 的情况）。
-  local -a ec_c=( '\_SB.PCI0.LPCB.EC0' '\_SB.PC00.LPCB.EC0' '\_SB.PC00.LPCB.EC0' )
-  local -a fan_c=( '\_SB.PCI0.LPCB.EC0.TFN1' '\_SB.PC00.LPCB.EC0.TFN1' '\_SB.IETM.TFN1' )
+  # ACPI 候选成对读取（EC 根 与 风扇设备 可能不在同一子树）。
+  [ -r "$PLAT_CAND" ] || { echo "pfan detect: 读不到候选清单 $PLAT_CAND" >&2; return 8; }
+  local -a ec_c=() fan_c=()
+  local _ec _fan
+  while read -r _ec _fan; do
+    [ -n "$_ec" ] && [ -n "$_fan" ] || continue
+    ec_c+=("$_ec"); fan_c+=("$_fan")
+  done < <(grep -vE '^#|^$' "$PLAT_CAND")
+  [ ${#ec_c[@]} -gt 0 ] || { echo "pfan detect: 候选清单为空" >&2; return 8; }
   local i=0
   case "${PFAN_ACPI_PROBE:-}" in
     fail) echo "pfan detect: ACPI 候选全部读不到 _FST —— 拒绝回退默认值" >&2; return 5 ;;
@@ -103,13 +123,20 @@ detect(){
 
 case "$1" in
   detect) shift; detect "$@" ;;
-  get)    acquire; run "$F._FST" | sed 's/.*RESULT //' ;;
-  set)    L=$2
-          case "$L" in 0|25|30|40|50|60|70|80|85|90|95|100) ;; *) echo "档位: 0 25 30 40 50 60 70 80 85 90 95 100" >&2; exit 2;; esac
+  get)    need_F || exit 1; acquire; run "$F._FST" | sed 's/.*RESULT //' ;;
+  set)    L=${2:-}
+          # 细粒度：固件支持 0~120 任意整数（fine_grain_control=1）。
+          # 但 0 被明确禁止 —— 实测 _FSL 0 = 风扇停转（不是"交回曲线"）。
+          case "$L" in
+            ''|*[!0-9]*) echo "档位必须是 1..120 的整数" >&2; exit 2 ;;
+          esac
+          [ "$L" -ge 1 ] && [ "$L" -le 120 ] || {
+            echo "档位必须在 1..120（0 被禁：实测 _FSL 0 = 风扇停转）" >&2; exit 2; }
+          need_F || exit 1
           acquire
           echo "$F._FSL 1 $L" > $DEV; sleep 0.6
           echo "已设 ${L}% -> 当前 $(pfan get)" ;;
-  sensors) acquire; run "\_SB_.PTID.OSDL" | sed 's/.*RESULT //' ;;
-  list)   echo "可选档位: 0(关) 25 30 40 50 60 70 80 85 90 95 100" ;;
+  sensors) need_F || exit 1; acquire; run "\_SB_.PTID.OSDL" | sed 's/.*RESULT //' ;;
+  list)   echo "档位: 1..120 任意整数（0 被禁：实测 _FSL 0 = 风扇停转）" ;;
   *)      echo "用法: pfan {detect [--write <file>]|get|set <档位>|list|sensors}"; exit 1 ;;
 esac

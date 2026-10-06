@@ -1,0 +1,9 @@
+# 已知机型的 (EC_ROOT, FAN_DEVICE) 成对候选 —— 两列，空格分隔。
+# 用法：
+#   pfan detect   按顺序探测，第一组 _FST 可读即采用
+#   pfand fail-safe 对每个 FAN_DEVICE 写 100%（platform.conf 缺失时用）
+# 为什么成对而不是只列 EC 根：社区记录存在风扇设备位于 \_SB.IETM.TFN1 的机型，
+# 不在 EC0 子树下 —— 由 EC_ROOT 推导 FAN_DEVICE 是错的。
+\_SB.PCI0.LPCB.EC0 \_SB.PCI0.LPCB.EC0.TFN1
+\_SB.PC00.LPCB.EC0 \_SB.PC00.LPCB.EC0.TFN1
+\_SB.PC00.LPCB.EC0 \_SB.IETM.TFN1

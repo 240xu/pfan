@@ -14,12 +14,28 @@ import subprocess
 import threading
 import time
 
-DEV = "/dev/pfanctl"
-EC = r"\_SB.PCI0.LPCB.EC0"
-FST = EC + ".TFN1._FST"
-FSL = EC + ".TFN1._FSL"
+from pfan_platform import REPO_EXAMPLE as _PLAT_FALLBACK
+
+# 平台路径全部来自 platform.conf（与 core/platform.sh 同一份文件）。
+# 硬编码本机路径会让别的机型完全读不到温度 —— 见 docs/specs 的 §2。
+from pfan_platform import load as _plat_load
+
+try:
+    _PLAT = _plat_load()
+except OSError as _e:
+    # 回退到仓库内的 example 只为让进程能起来看日志；必须显式记录，不许静默。
+    import sys
+    print(f"pfanel: 读不到平台配置 ({_e})，回退 example —— 生产环境应立刻 pfan detect",
+          file=sys.stderr, flush=True)
+    _PLAT = _plat_load(_PLAT_FALLBACK)
+
+EC   = _PLAT["EC_ROOT"]            # EC 根，形如 _SB.<bus>.LPCB.EC0
+FAN  = _PLAT["FAN_DEVICE"]         # 风扇设备；可能与 EC 不同子树（见候选清单）
+FST  = FAN + "._FST"
+FSL  = FAN + "._FSL"
 EC88 = EC + ".EC88"
-TZ  = "/sys/class/thermal/thermal_zone9/temp"
+TZ   = _PLAT["THERMAL_ZONE"]
+DEV  = _PLAT.get("DEV", "/dev/pfanctl")
 DB  = "/var/lib/pfanel/pfanel.db"
 LEVELS = [0, 25, 30, 40, 50, 60, 70, 80, 85, 90, 95, 100]
 

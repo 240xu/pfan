@@ -29,15 +29,41 @@ DWELL=30            # 调档最小间隔 s
 DEAD=2              # 输出死区：与当前值差 <DEAD 不写
 IV=10
 
-F="\_SB.PCI0.LPCB.EC0.TFN1"
-DEV=/dev/pfanctl
 LOCK=/run/pfanel.lock
+LOG=/var/log/pfand.log
+log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
+
+# 平台配置：路径一律来自 platform.conf，本文件不再硬编码 ACPI/热区路径。
+# 缺失即 fail-safe —— 绝不带错误路径空转（会把风扇交给一个读不到温度的控制律）。
+_plat_sh="${PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh}"
+[ -f "$_plat_sh" ] || _plat_sh="$(dirname "$0")/platform.sh"
+CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
+[ -f "$CAND" ] || CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
+DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
+F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
+Z=$(pfan_plat THERMAL_ZONE 2>/dev/null) || Z=""
+if ! command -v pfan_plat >/dev/null 2>&1 || [ -z "$F" ] || [ -z "$Z" ]; then
+  # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁
+  exec 9>"$LOCK" 2>/dev/null
+  log "平台配置不可用(F='$F' Z='$Z', 加载器 '$_plat_sh') -> fail-safe 满速 100% 并退出（先跑 pfan detect）"
+  # F 未知时对候选清单里的每个风扇设备都写 100%：哪个能解析哪个生效
+  if [ -r "$CAND" ]; then
+    while read -r _ec _fan; do
+      [ -n "$_fan" ] || continue
+      flock -x 9 2>/dev/null; echo "$_fan._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9 2>/dev/null
+    done < <(grep -vE '^#|^$' "$CAND")
+  fi
+  exit 0
+fi
 # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁，
 #    否则读到别人刚写的 RESULT（2026-10-05 审计）。
 exec 9>"$LOCK"
-Z=/sys/class/thermal/thermal_zone9/temp
-LOG=/var/log/pfand.log
-log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
+if [ -z "$DEV" ] || [ ! -c "$DEV" ]; then
+  log "设备 $DEV 不可用 -> fail-safe 满速并退出"
+  flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
+  exit 0
+fi
+LOG=${PFAN_LOG:-/var/log/pfand.log}
 
 getL(){
     # 必须等「新的 RESULT 行」出现：旧实现第一轮就取 tail -1，
