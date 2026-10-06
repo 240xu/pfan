@@ -14,10 +14,15 @@ import subprocess
 import threading
 import time
 
-from pfan_platform import REPO_EXAMPLE as _PLAT_FALLBACK
-
 # 平台路径全部来自 platform.conf（与 core/platform.sh 同一份文件）。
 # 硬编码本机路径会让别的机型完全读不到温度 —— 见 docs/specs 的 §2。
+from pfan_core import (  # noqa: F401 (FPS/LEVELS 供 API 用)
+    FPS,
+    LEVELS,
+    est_rpm,
+    validate_params,
+)
+from pfan_platform import REPO_EXAMPLE as _PLAT_FALLBACK
 from pfan_platform import load as _plat_load
 
 try:
@@ -37,7 +42,7 @@ EC88 = EC + ".EC88"
 TZ   = _PLAT["THERMAL_ZONE"]
 DEV  = _PLAT.get("DEV", "/dev/pfanctl")
 DB  = "/var/lib/pfanel/pfanel.db"
-LEVELS = [0, 25, 30, 40, 50, 60, 70, 80, 85, 90, 95, 100]
+# LEVELS 已迁至 pfan_core（表只有一份）
 
 # --- 风扇曲线（EC 0x79）: 只在 _FSL=0（交回曲线）时生效 ---
 CURVES = {
@@ -139,10 +144,7 @@ def guard():
         pass
     return t
 # INT3404 state* 表: 档位% -> (rpm_min, noise_mdB, power_mW)
-FPS = {25:(3200,12500,1250),30:(3800,15000,1500),40:(5100,20000,2000),
-       50:(6300,25000,2500),60:(7400,30000,3000),70:(9300,35000,3500),
-       80:(9800,40000,4000),85:(10500,42500,4250),90:(11200,45000,4500),
-       95:(11600,47500,4750),100:(12000,50000,5000)}
+# FPS 已迁至 pfan_core（表只有一份）
 
 def _result_state():
     """返回 (最后一行 RESULT 的值, 该行的内核时间戳)。
@@ -221,12 +223,7 @@ def get_ec76():
     except Exception:
         return None
 
-def est_rpm(byte1):
-    """把 EC 状态字节换算成近似 RPM（对齐 _FPS 表）"""
-    if byte1 is None or byte1 < 1: return None
-    p = min(LEVELS, key=lambda l: abs(l - byte1))
-    rpm = FPS.get(p, (3200,))[0]
-    return int(rpm * byte1 / max(p, 1))
+# est_rpm 已迁至 pfan_core
 
 def db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
@@ -371,32 +368,7 @@ def read_params():
         pass
     return d
 
-def validate_params(d):
-    """严格校验：温度必须严格递增、档位在 [L0, CAP]、EMERG 高于最后一档"""
-    errs = []
-    # 注意：E（应急档位）必须在里面 —— 否则 :306 的 d["E"] 会 KeyError，
-    # 前端漏传时返回 500 而不是 400（2026-10-05 审计实测）。
-    need = ("IDLE","L0","T1","L1","T2","L2","T3","L3","T4","L4","T5","L5",
-            "EMERG","E","EMERG_REL","CAP","TRIM","GAIN","HYST","DWELL","DEAD","IV")
-    miss = [k for k in need if k not in d]
-    if miss:
-        errs.append("缺少参数: " + ",".join(miss)); return errs
-    temps = [d["IDLE"],d["T1"],d["T2"],d["T3"],d["T4"],d["T5"],d["EMERG"]]
-    for a,b in zip(temps, temps[1:]):
-        if b <= a: errs.append("温度必须严格递增: %s" % temps); break
-    if d["EMERG_REL"] >= d["EMERG"]:
-        errs.append("EMERG_REL(%d) 必须小于 EMERG(%d)" % (d["EMERG_REL"], d["EMERG"]))
-    lv = [d["L0"],d["L1"],d["L2"],d["L3"],d["L4"],d["L5"]]
-    for x in lv:
-        if x < 0 or x > d["CAP"]:
-            errs.append("档位 %d 超出 [0,%d]" % (x, d["CAP"])); break
-    if d["E"] < d["CAP"]:
-        errs.append("应急档 E(%d) 不应小于 CAP(%d)" % (d["E"], d["CAP"]))
-    if d["IV"] < 2: errs.append("IV 采样间隔至少 2s")
-    if d["DWELL"] < d["IV"]: errs.append("DWELL 驻留不应小于 IV")
-    if d["TRIM"] < 0 or d["TRIM"] > 30: errs.append("TRIM 需在 0~30")
-    if d["GAIN"] < 0 or d["GAIN"] > 10: errs.append("GAIN 需在 0~10")
-    return errs
+# validate_params 已迁至 pfan_core
 
 def write_params(d):
     lines = ["# pfand 曲线参数 —— 由面板「自定义曲线」按钮写入",

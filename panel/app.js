@@ -1,4 +1,4 @@
-import { esc, fmtTemp } from "/pfan-core.js";
+import { checkTempOrder, esc, fmtTemp } from "/pfan-core.js";
 
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
@@ -345,11 +345,9 @@ function readEditor(){
 }
 function preview(){
   const o=readEditor();
-  // 本地预校验：温度递增
-  const t=[o.IDLE,o.T1,o.T2,o.T3,o.T4,o.T5,o.EMERG];
-  for(let i=1;i<t.length;i++) if(t[i]<=t[i-1]){
-    msg(`⚠ 温度必须严格递增（当前 ${t.join(' → ')}）`,'#f85149'); return;
-  }
+  // 校验逻辑在 core.js（可被 vitest 覆盖），这里只负责显示结果
+  const err=checkTempOrder([o.IDLE,o.T1,o.T2,o.T3,o.T4,o.T5,o.EMERG]);
+  if(err){ msg('⚠ '+err,'#f85149'); return; }
   msg('✓ 校验通过，点保存生效','#3fb950');
 }
 async function saveParams(){
