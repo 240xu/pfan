@@ -41,8 +41,9 @@ FST  = FAN + "._FST"
 FSL  = FAN + "._FSL"
 EC88 = EC + ".EC88"
 TZ   = _PLAT["THERMAL_ZONE"]
-DEV  = _PLAT.get("DEV", "/dev/pfanctl")
-DB  = "/var/lib/pfanel/pfanel.db"
+DEV  = os.environ.get("PFAN_DEV", "") or _PLAT.get("DEV", "/dev/pfanctl")
+      # 与 pfand/pfan 同名接缝：设置后优先于平台配置（测试用假设备）
+DB  = os.environ.get("PFAN_DB", "/var/lib/pfanel/pfanel.db")
 # LEVELS 已迁至 pfan_core（表只有一份）
 
 # --- 风扇曲线（EC 0x79）: 只在 _FSL=0（交回曲线）时生效 ---
@@ -55,7 +56,7 @@ CURVES = {
 }
 # 静态面板目录（部署路径，非硬件平台路径）。可用 PFAN_PANEL_DIR 覆盖以便测试/迁移。
 PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", "/opt/beszel/beszel_data")
-CURVE_FILE = "/var/lib/pfanel/curve.state"
+CURVE_FILE = os.environ.get("PFAN_CURVE_FILE", "/var/lib/pfanel/curve.state")
 GUARD_TEMP = 82    # 看门狗阈值：quiet 下超过此温度自动回退（TjMax=100）
 
 def get_state():
@@ -153,7 +154,10 @@ def _result_state():
     用时间戳而非行数判定「新结果」：dmesg 是环形缓冲，行被不断淘汰，
     绝对行数会在 2064→2063 这样下降，导致永远等不到"增长"（2026-10-05 实测）。
     内核时间戳严格单调，且三方共锁后不会被别人的结果污染。"""
-    out = subprocess.run(["dmesg"], capture_output=True, text=True).stdout
+    # 与 pfand 同名接缝：缺省 dmesg（生产），测试可指向 fake/bin/dmesg。
+    # 不这么做的话每次 acpi() 都要等满 20×0.12s 轮询，HTTP 测试会超时。
+    out = subprocess.run([os.environ.get("PFAN_DMESG", "dmesg")],
+                        capture_output=True, text=True).stdout
     last, ts = None, -1.0
     for line in out.splitlines():
         if "pfanctl: RESULT" in line:
@@ -170,7 +174,7 @@ def acpi(path, args=""):
     ② 行数增长判定：只有 RESULT 总数超过写入前的数量才算拿到新结果；
        超时返回 None（而不是旧值），避免把 10 秒前的读数当成本次结果。"""
     cmd = f"{path} {args}".strip()
-    lockf = "/run/pfanel.lock"
+    lockf = os.environ.get("PFAN_LOCK", "/run/pfanel.lock")   # 与 pfand/pfan 同一把锁、同名接缝
     with open(lockf, "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         _, before = _result_state()
@@ -330,7 +334,7 @@ def events(limit=60):
     except Exception:
         return []
 
-TOKEN_FILE = "/var/lib/pfanel/token"
+TOKEN_FILE = os.environ.get("PFAN_TOKEN_FILE", "/var/lib/pfanel/token")
 _tok = None
 
 def get_token():
@@ -353,7 +357,7 @@ def get_token():
             pass
     return _tok
 
-CONF = "/etc/pfand.conf"
+CONF = os.environ.get("PFAN_CONF", "/etc/pfand.conf")
 PARAM_KEYS = ("IDLE","L0","T1","L1","T2","L2","T3","L3","T4","L4","T5","L5",
               "EMERG","E","EMERG_REL","CAP","TRIM","GAIN","HYST","DWELL","DEAD","IV")
 
@@ -446,6 +450,30 @@ def history(hours=24, limit=2000, curve_only=False):
     return [{"ts":r[0],"temp":r[1],"level":r[2],"ec76":r[3],"rpm":r[4]}
             for r in reversed(rows)]
 
+# ②⑤ 写接口的 CSRF 白名单 —— 可配置，不再是源码里的硬编码常量。
+# 缺省值必须【等于当前生产值】（tests/python/test_http.py 会断言），这样改配置才是可选的。
+DEFAULT_ORIGINS = "pfan.example.com,127.0.0.1,localhost,192.168.1.10"
+
+
+def origin_allowed(origin, allow=None):
+    """Origin 是否在白名单里（写接口的 CSRF 门）。
+
+    allow 可注入，便于测试白名单本身；不传则读 PFAN_ORIGIN_ALLOW（逗号分隔）。
+    """
+    if not origin:
+        return False
+    if allow is None:
+        allow = [x.strip() for x in
+                 os.environ.get("PFAN_ORIGIN_ALLOW", DEFAULT_ORIGINS).split(",")
+                 if x.strip()]
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(origin).hostname or "").lower()
+    except Exception:
+        return False
+    return host in allow
+
+
 class H(http.server.BaseHTTPRequestHandler):
     def _panel(self, name):
         """读面板文件并注入 Token —— 占位符可能在 HTML，也可能在 app.js（拆分后在 JS）。"""
@@ -466,7 +494,8 @@ class H(http.server.BaseHTTPRequestHandler):
         b = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type","application/json")
-        self.send_header("Access-Control-Allow-Origin","*")
+        # ②⑦ 这里【不发】Access-Control-Allow-Origin：面板与 API 同源，
+        #     通配 CORS 只会让 LAN 内任意网页跨域读遥测。测试 test_api_has_no_wildcard_cors 守着。
         self.send_header("Content-Length",str(len(b)))
         self.end_headers()
         self.wfile.write(b)
@@ -527,18 +556,10 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"error":str(e)}, 500)
 
     MAX_BODY = 64 * 1024          # ② 请求体上限，防大 Content-Length 打内存
-    ALLOWED_HOSTS = ("pfan.example.com", "127.0.0.1", "localhost", "192.168.1.10")
-
     @staticmethod
     def _same_origin(origin):
-        if not origin:
-            return False
-        try:
-            from urllib.parse import urlparse
-            host = (urlparse(origin).hostname or "").lower()
-        except Exception:
-            return False
-        return host in H.ALLOWED_HOSTS
+        # 白名单已下沉到模块级 origin_allowed()，可用 PFAN_ORIGIN_ALLOW 配置（②⑤）
+        return origin_allowed(origin)
 
     def _deny(self, msg, code=403):
         try:
@@ -615,10 +636,17 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a): pass
 
+class Server(socketserver.ThreadingTCPServer):
+    """⑯ daemon_threads 必须为 True：ThreadingTCPServer 默认 False，
+    一个挂住的 handler 就会让 shutdown() 永远等下去（重启/部署被卡）。
+    allow_reuse_address 让测试能反复绑定同端口。"""
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 if __name__ == "__main__":
     # 测试接缝：缺省 8789 与生产一致（test_pfand_loop.sh T0 断言）
     _PORT = int(os.environ.get("PFAN_PORT", "8789"))
     threading.Thread(target=collector, daemon=True).start()
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.ThreadingTCPServer(("0.0.0.0", _PORT), H) as s:
+    with Server(("0.0.0.0", _PORT), H) as s:
         s.serve_forever()
