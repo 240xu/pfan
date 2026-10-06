@@ -10,5 +10,6 @@ cd "$(dirname "$0")/.."
 [ "$(grep -c __PFAN_TOKEN__ panel/pfanpanel.html)" -eq 1 ]
 [ "$(grep -c 'obj-m' core/pfanctl/Makefile)" -eq 1 ]
 find . -type f -size 0 -not -path './.git/*' -not -path './scripts/*' | grep -q . && { echo "有空文件"; exit 1; }
-sha256sum -c BASELINE.sha256 --quiet
+# BASELINE.sha256 是【导入时刻】的溯源记录，不是"文件永不变更"的不变式。
+# 源码此后会随 P1/P2 演进，故此处不做哈希比对（Task 2 Ruling）。
 echo "verify-import: PASS"

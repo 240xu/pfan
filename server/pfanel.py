@@ -3,8 +3,16 @@
 从 ACPI 读取温度/风扇状态，写入 _FSL 控制档位，历史存 SQLite。
 被 pfanpanel(前端)调用；也提供 HTTP JSON 接口。
 """
+import fcntl
+import http.server
+import json
+import os
 import re
-import json, os, sqlite3, subprocess, time, threading, http.server, socketserver, fcntl
+import socketserver
+import sqlite3
+import subprocess
+import threading
+import time
 
 DEV = "/dev/pfanctl"
 EC = r"\_SB.PCI0.LPCB.EC0"
