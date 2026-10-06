@@ -49,6 +49,9 @@ DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/
 DMESG="${PFAN_DMESG:-dmesg}"
 CONF="${PFAN_CONF:-/etc/pfand.conf}"
 CURVE_FILE="${PFAN_CURVE_FILE:-/var/lib/pfanel/curve.state}"
+# ⑬ 应急锁定必须持久化：emerg 是【滞回】状态（进易出难），只存内存的话，
+# 守护重启后温度若落在 [EMERG_REL, EMERG) 区间，want_for 会直接给 L5 —— 等于提前解除应急。
+EMERG_FILE="${PFAN_EMERG_FILE:-/var/lib/pfanel/emerg.state}"
 # 设备判定：生产要求字符设备（模块没加载就该 fail-safe）；
 # 显式设置了 PFAN_DEV 则只查存在性 —— 假设备是普通文件。
 dev_ok(){ if [ -n "${PFAN_DEV:-}" ]; then [ -e "$1" ]; else [ -c "$1" ]; fi; }
@@ -236,6 +239,21 @@ c=$(center_of "$base"); w=$(( (T - c) * GAIN ))
 [ $w -gt $TRIM ] && w=$TRIM; [ $w -lt -$TRIM ] && w=$((-TRIM)); trim=$w
 apply "$(want_for $T)" "启动"
 
+# ⑬ 恢复应急锁定 —— 必须放在启动【对齐之后】：
+# 对齐会按 want_for(T) 写一次，若在它之前恢复，这次对齐会把满速覆盖成本档（77C -> 70%），
+# 要等下一个循环的"应急重推"才纠回来，中间是真实的低档窗口。
+# 仅当温度仍高于 EMERG_REL 才算有效，否则视为滞回已过期。
+if [ -r "$EMERG_FILE" ] && [ "$(cat "$EMERG_FILE" 2>/dev/null)" = "1" ]; then
+    if [ "$T" -gt "$EMERG_REL" ]; then
+        emerg=1; base=$E; trim=0
+        setL "$E"; written=$E
+        log "恢复应急锁定 T=${T}C > ${EMERG_REL}C（来自 $EMERG_FILE）"
+    else
+        echo 0 > "$EMERG_FILE" 2>/dev/null || log "清除应急状态失败: $EMERG_FILE"
+        log "应急状态过期 T=${T}C <= ${EMERG_REL}C，已清除"
+    fi
+fi
+
 while :; do
     sleep "$IV"
     now=$(date +%s)
@@ -257,6 +275,7 @@ while :; do
     # ---- 应急：进入易，退出难（锁定到 EMERG_REL） ----
     if [ "$tgt" = "$E" ] && [ "$emerg" = "0" ]; then
         emerg=1; trim=0; setL "$E"; written=$E; base=$E; last=$now
+        echo 1 > "$EMERG_FILE" 2>/dev/null || log "写应急状态失败: $EMERG_FILE"
         log "应急满速 T=${T}C >= ${EMERG}C"; continue
     fi
     if [ "$emerg" = "1" ]; then
@@ -268,6 +287,7 @@ while :; do
         fi
         [ "$T" -le "$EMERG_REL" ] || continue
         emerg=0; base=$(want_for "$T"); trim=0; last=$now
+        echo 0 > "$EMERG_FILE" 2>/dev/null || log "写应急状态失败: $EMERG_FILE"
         log "应急解除 T=${T}C"; continue
     fi
 

@@ -18,6 +18,7 @@ grep -q 'PFAN_DMESG:-dmesg' core/pfand && ok "PFAN_DMESG 默认 dmesg" || ng "PF
 grep -q 'PFAN_CONF:-/etc/pfand.conf' core/pfand && ok "PFAN_CONF 默认 /etc/pfand.conf" || ng "PFAN_CONF 默认值漂移"
 grep -q 'PFAN_CURVE_FILE:-/var/lib/pfanel/curve.state' core/pfand && ok "PFAN_CURVE_FILE 默认正确" || ng "PFAN_CURVE_FILE 默认值漂移"
 grep -qE 'PFAN_PORT"?, *"?8789' server/pfanel.py && ok "PFAN_PORT 默认 8789" || ng "PFAN_PORT 默认值漂移"
+grep -q 'PFAN_EMERG_FILE:-/var/lib/pfanel/emerg.state' core/pfand && ok "PFAN_EMERG_FILE 默认 /var/lib/pfanel/emerg.state" || ng "PFAN_EMERG_FILE 默认值漂移或缺失"
 if grep -rhE 'PFAN_(DMESG|CONF|CURVE_FILE|PORT|DEV|LOCK|PROBE)=' systemd/ 2>/dev/null | grep -q .; then
   ng "systemd 单元里出现了测试接缝"
 else ok "systemd 单元未设置任何测试接缝"; fi
@@ -51,7 +52,8 @@ printf '{"curve":"s0i3"}\n' > "$T/curve"
 stop
 timeout 14 env PFAN_PLATFORM_CONF="$T/plat.conf" PFAN_DEV="$T/dev" PFAN_DMESG=fake/bin/dmesg \
   PFAN_DMESG_STATE="$T/st" PFAN_DMESG_LOG="$T/dl" PFAN_LOCK="$T/lock" PFAN_CONF="$T/conf" \
-  PFAN_CURVE_FILE="$T/curve" PFAN_LOG="$T/pfand.log" bash core/pfand >"$T/out" 2>&1 &
+  PFAN_CURVE_FILE="$T/curve" PFAN_EMERG_FILE="$T/emerg" PFAN_LOG="$T/pfand.log" \
+  bash core/pfand >"$T/out" 2>&1 &
 PIDD=$!
 sleep 5
 # 必须查【累计流水】$T/dl 而不是 $T/dev：假设备文件只保留最后一次操作，
@@ -74,9 +76,47 @@ after=$(grep -c '升温\|微调' "$T/pfand.log" 2>/dev/null || true); after=${af
 
 echo "== T5: 过热必须打到应急档 =="
 echo 85000 > "$T/temp"; sleep 5
-if grep -qE '应急|set=100' "$T/pfand.log" 2>/dev/null || grep -q '_FSL 1 100' "$T/dev" 2>/dev/null; then
+if grep -qE '应急|set=100' "$T/pfand.log" 2>/dev/null || grep -q '_FSL 1 100' "$T/dl" 2>/dev/null; then
   ok "85C >= EMERG(80) → 应急满速"
 else ng "未见应急 (tail=$(tail -3 "$T/pfand.log" 2>/dev/null | tr '\n' '|'))"
+fi
+
+echo "== T6: 应急滞回 —— 回落到 [EMERG_REL, EMERG) 必须仍锁在满速 =="
+# EMERG=80, EMERG_REL=75。77 落在两者之间：want_for(77)=L5=70，
+# 但滞回要求仍停在 100，直到温度跌破 75。
+echo 77000 > "$T/temp"; sleep 6
+lastdev=$(grep '_FSL 1 ' "$T/dl" 2>/dev/null | tail -1)
+if grep -q '应急解除' "$T/pfand.log" 2>/dev/null; then
+  ng "77C 就解除了应急（滞回失效）: $(grep '应急解除' "$T/pfand.log" | tail -1)"
+elif echo "$lastdev" | grep -q '_FSL 1 100'; then
+  ok "77C 仍锁在 100%（滞回生效）: $lastdev"
+else
+  ng "77C 时档位掉到非100: $lastdev"
+fi
+
+echo "== T7: 重启后应急锁定必须恢复（backlog ⑬）=="
+stop
+sleep 1
+timeout 14 env PFAN_PLATFORM_CONF="$T/plat.conf" PFAN_DEV="$T/dev" PFAN_DMESG=fake/bin/dmesg \
+  PFAN_DMESG_STATE="$T/st" PFAN_DMESG_LOG="$T/dl" PFAN_LOCK="$T/lock" PFAN_CONF="$T/conf" \
+  PFAN_CURVE_FILE="$T/curve" PFAN_EMERG_FILE="$T/emerg" PFAN_LOG="$T/pfand.log" bash core/pfand >>"$T/out" 2>&1 &
+PIDD=$!
+sleep 5
+after_restart=$(grep '_FSL 1 ' "$T/dl" 2>/dev/null | tail -1)
+if grep -q '恢复应急锁定' "$T/pfand.log" 2>/dev/null && echo "$after_restart" | grep -q '_FSL 1 100'; then
+  ok "重启后恢复应急锁定，仍 100%: $after_restart"
+elif echo "$after_restart" | grep -q '_FSL 1 100'; then
+  ok "重启后仍是 100%（虽未打恢复日志）: $after_restart"
+else
+  ng "重启后应急锁定丢失，掉到: $after_restart（want_for(77)=70 即为 ⑬ 的原始缺陷）"
+fi
+
+echo "== T8: 跌破 EMERG_REL 才解除应急 =="
+echo 70000 > "$T/temp"; sleep 6
+if grep -q '应急解除' "$T/pfand.log" 2>/dev/null; then
+  ok "70C <= EMERG_REL(75) 解除应急: $(grep '应急解除' "$T/pfand.log" | tail -1)"
+else
+  ng "70C 仍未解除应急: $(tail -3 "$T/pfand.log" | tr '\n' '|')"
 fi
 stop
 
