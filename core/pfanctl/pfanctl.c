@@ -42,16 +42,37 @@ static int dump_obj(union acpi_object *o, char *out, int maxlen, int level)
 	return len;
 }
 
-/* 参数解析：只有 0x/0X/0b/0B 前缀才走 base 0，其余一律十进制。
- * 用 base 0 的后果是 "080" 被当成八进制读 —— '8' 不是八进制数字，就地截断成 0，
- * _FSL 收到 0 => 风扇停转，而用户明明写的是 80（2026-10-06 复审 I1 实测）。
- * 但 EC88 的 0x79 / 0x02 必须仍按十六进制解析，所以不能一刀切改成十进制。 */
+/* 参数解析。坏 token 返回 -EINVAL，绝不静默变成 0。
+ *
+ * 0 表示停转，而 "0" 与"解析失败"在旧实现里是同一个值：
+ *   - base 0 下 "080" 被读成八进制，'8' 不是八进制数字 → 就地截断成 0；
+ *   - 更要命的是 simple_strtol 对非数字（"abc"、""、"-1"）一律返回 0 且不报错，
+ *     于是 "ec88 zz" 之类会把 0 当参数发进 ACPI（复审 F5）。
+ * 分隔符必须是空格或串尾：只吃一半（"42abc"）等于丢掉后缀，档位照样算错。
+ *
+ * base：内核 simple_strtol 的 base=0 只认 0x/0X，【没有 0b/0B】——
+ * 之前注释声称 b/B 也走 base 0 是错的（"0b101" 只会解析出 0）。
+ * 十进制是缺省，EC88 的 0x79 / 0x02 走 base 0 分支。 */
 static long pfan_parse(const char *s, char **endp)
 {
-	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X' ||
-			    s[1] == 'b' || s[1] == 'B'))
-		return simple_strtol(s, endp, 0);
-	return simple_strtol(s, endp, 10);
+	char *end = NULL;
+	long v;
+	int base = 10;
+
+	/* 只接受以数字开头：非数字开头（空串、字母、负号）直接判非法。
+	 * 档位与 EC 参数都是非负数，负号没有合法用途。 */
+	if (!s || s[0] < '0' || s[0] > '9')
+		return -EINVAL;
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+		base = 0;
+	v = simple_strtol(s, &end, base);
+	if (!end || end == s)
+		return -EINVAL;
+	if (*end != '\0' && *end != ' ')
+		return -EINVAL;		/* 半截 token：静默丢后缀 = 算错档 */
+	if (endp)
+		*endp = (char *)end;
+	return v;
 }
 
 static int pfan_eval(const char *path, int argc, long *av)
@@ -98,15 +119,22 @@ static ssize_t pfan_write(struct file *f, const char __user *buf, size_t n, loff
 {
 	char kbuf[512], *p2, *p3;
 	long a[4] = {0,0,0,0};
+	long err;
 	int argc = 0, i;
 	if (n >= sizeof(kbuf)) n = sizeof(kbuf)-1;
 	if (copy_from_user(kbuf, buf, n)) return -EFAULT;
 	kbuf[n] = 0; strim(kbuf);
 	p2 = strchr(kbuf, 0x20);
-	if (p2) { *p2 = 0; p2++; argc = (int)pfan_parse(p2, NULL);
+	if (p2) { *p2 = 0; p2++;
+		err = pfan_parse(p2, NULL);
+		if (err < 0) return err;	/* -EINVAL：坏 token 绝不发进 ACPI */
+		argc = (int)err;
 		p3 = strchr(p2, 0x20);
 		if (p3) { *p3 = 0; p2 = p3 + 1;
-			for (i = 0; i < 4 && p2; i++) { a[i] = pfan_parse(p2, &p2);
+			for (i = 0; i < 4 && p2; i++) {
+				err = pfan_parse(p2, &p2);
+				if (err < 0) return err;
+				a[i] = err;
 				if (!p2) break; p2 = strchr(p2, 0x20); if (p2) p2++; } } }
 	/* 便捷语法: "ec88 0x76" -> 展开为完整 EC88 调用 */
 	if (strncmp(kbuf, "ec88", 4) == 0) {
@@ -121,7 +149,9 @@ static ssize_t pfan_write(struct file *f, const char __user *buf, size_t n, loff
 			int na = 0;
 			if (q) { *q = 0; q++;
 				while (q && na < 4) {
-					av[na++] = pfan_parse(q, &q);
+					err = pfan_parse(q, &q);
+					if (err < 0) return err;
+					av[na++] = err;
 					if (!q) break;
 					q = strchr(q, 0x20);
 					if (q) q++;

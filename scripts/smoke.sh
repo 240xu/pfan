@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # scripts/smoke.sh — 实机只读冒烟。
-# 只允许：GET / systemctl show|is-active|is-enabled / cat / grep / ufw status。
+# 只允许：GET / systemctl show|is-active|is-enabled / cat / grep / stat / ufw status /
+#         pfan get（写进设备的只有 _FST 查询，是 getter，不改风扇档位）。
 # 严禁任何写操作（POST、set_level、set_curve、systemctl start|stop|restart、ufw allow|delete、rm）。
 # Termux 注意：/usr/bin/env 不存在，且无 /tmp 写权限 → 用 `bash scripts/smoke.sh` 调用。
 set -uo pipefail
@@ -73,12 +74,12 @@ printf '\n=== 2b. 读接口不得发通配 CORS（②⑦）===\n'
 # 拿它检查会得到"没有这个头"的假阳性（2026-10-06 实测踩过）。
 acao=$(timeout 30 curl -sS -D - -o /dev/null --max-time 20 "$API/api/now" 2>/dev/null \
        | tr -d '\r' | grep -i '^access-control-allow-origin:' || true)
+# 只允许【完全没有】这个头。反射型 ACAO（把请求 Origin 回显回去）对浏览器来说
+# 与通配等价，之前的 "非通配就算 ok" 分支会把它放过去。
 if [ -z "$acao" ]; then
   ok "无 Access-Control-Allow-Origin（同源面板不需要 CORS）"
-elif echo "$acao" | grep -qi '\*'; then
-  bad "仍是通配 CORS: $acao —— LAN 内任意网页可跨域读遥测"
 else
-  ok "非通配 CORS: $acao"
+  bad "发了 CORS 头（反射型与通配同样危险）: $acao"
 fi
 
 printf '\n=== 3. 公网入口 ===\n'
@@ -141,6 +142,39 @@ if remote 'sudo -n test -s /etc/pfan/fan-candidates.txt' 2>/dev/null; then
   ok "候选清单存在非空"
 else
   bad "/etc/pfan/fan-candidates.txt 缺失 —— fail-safe 无候选可写"
+fi
+
+printf '\n=== 7. /dev/pfanctl 节点形状（2026-10-06 事故自检：普通文件遮蔽字符设备）===\n'
+# 只读：stat 只取元数据，绝不写设备。恢复命令只出现在提示里，本脚本永不执行它。
+# 恢复（docs/OPERATIONS.md 同款）：先删节点再重载模块，devtmpfs 会重建字符设备。
+# 下面用 `""` 拼接是故意的：ci.sh 的只读守卫会把任何非注释行里的 `rm -` 判为写操作，
+# 而失败信息必须带上完整恢复命令（否则现场的人还得去翻文档）。
+RECOVER="rm ""-f /dev/pfanctl 后按 docs/OPERATIONS.md 重载 pfanctl 模块（devtmpfs 重建字符设备）"
+dnn=$(remote 'stat -c "%F|%a" /dev/pfanctl' 2>/dev/null || true)
+ft=${dnn%%|*}
+md=${dnn##*|}
+if [ -z "$dnn" ]; then
+  bad "/dev/pfanctl 读不到（节点不存在？模块未加载）—— 恢复: $RECOVER"
+elif [ "$ft" != "character special file" ]; then
+  bad "危险: /dev/pfanctl 是【$ft】不是字符设备 —— 普通文件遮蔽（echo 进去被静默吞掉，全部风扇读写失效、无任何报错；2026-10-06 事故）。恢复: $RECOVER"
+elif [ "$md" != "600" ]; then
+  bad "危险: /dev/pfanctl 权限 $md ≠ 600 —— 该节点接受任意 ACPI 路径求值，写权限≈root，不得非 root/world 可访问。恢复: $RECOVER"
+else
+  ok "/dev/pfanctl = character special file 600（与 SECURITY.md 声明一致）"
+fi
+
+printf '\n=== 8. pfan 读路径实跑一次（RESULT 消费者之一，2026-10-06 后新增接缝的现场校验）===\n'
+# 只读：pfan get 对设备写入的是 _FST 查询（getter，不改变档位），走 sudo -n 取 root
+# （/dev/pfanctl 是 600 root，且 dmesg 可能被 dmesg_restrict 拦 —— 与生产同路径）。
+if out=$(remote "timeout 20 sudo -n /usr/local/bin/pfan get" 2>&1); then
+  line=$(printf '%s\n' "$out" | sed -n '/^\[/p' | tail -1)
+  if [ -n "$line" ]; then
+    ok "pfan get 读回: $line"
+  else
+    bad "pfan get 没有返回 [level,...] 行（RESULT 解析路径断了？）输出: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+  fi
+else
+  bad "pfan get 失败: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
 fi
 
 printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"

@@ -55,6 +55,16 @@ EMERG_FILE="${PFAN_EMERG_FILE:-/var/lib/pfanel/emerg.state}"
 # 设备判定：生产要求字符设备（模块没加载就该 fail-safe）；
 # 显式设置了 PFAN_DEV 则只查存在性 —— 假设备是普通文件。
 dev_ok(){ if [ -n "${PFAN_DEV:-}" ]; then [ -e "$1" ]; else [ -c "$1" ]; fi; }
+# I6：DEV 存在却【不是字符设备】= 文档化的事故形态（2026-10-06 实例：
+# rmmod 删掉节点后，一条 `echo … > /dev/pfanctl` 把它重建成普通文件，
+# 此后所有读写被静默丢弃约 2 分钟，风扇停在旧档）。
+# 这种文件上 `echo > "$DEV"` 会"成功"却永远到不了硬件 —— 所以两个 fail-safe
+# 分支都必须先认出它：点名危害 + 给恢复命令，且绝不声称尝试/完成过写入。
+# PFAN_DEV 是测试接缝（假设备本来就是普通文件），显式设置时豁免。
+dev_is_regular_file(){ [ -z "${PFAN_DEV:-}" ] && [ -n "${DEV:-}" ] && [ -e "$DEV" ] && [ ! -c "$DEV" ]; }
+log_dev_hazard(){
+    log "CRITICAL: $DEV 存在但不是字符设备（普通文件）—— rmmod 后被重建成普通文件，风扇读写全部被静默丢弃、档位停在旧值。恢复: rm -f $DEV && insmod /opt/pfanctl/pfanctl.ko（或 systemctl restart pfanctl）"
+}
 F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
 Z=$(pfan_plat THERMAL_ZONE 2>/dev/null) || Z=""
 # EC 根是【另一条】路径：EC88 写 EC 寄存器必须挂在 EC 根下，不是挂在风扇设备下。
@@ -71,6 +81,12 @@ if ! command -v pfan_plat >/dev/null 2>&1 || [ -z "$F" ] || [ -z "$Z" ] || [ -z 
   # ⑥ /dev/pfanctl 是单槽设备，必须与 pfanel/pfan 共用同一把锁
   exec 9>"$LOCK" 2>/dev/null
   log "平台配置不可用(F='$F' Z='$Z' EC='$EC', 加载器 '$_plat_sh') -> fail-safe 满速 100%（先跑 pfan detect）"
+  # I6：DEV 是普通文件时，下面的候选写入只会把字节写进一个假节点，
+  # 然后日志声称"已写满速"—— 到不了硬件的假话。先认出危害，一行都不写。
+  if dev_is_regular_file; then
+    log_dev_hazard
+    exit 1
+  fi
   # F 未知时对候选清单里的每个风扇设备都写 100%：哪个能解析哪个生效
   _wrote=0
   if [ -r "$CAND" ]; then
@@ -90,8 +106,14 @@ fi
 #    否则读到别人刚写的 RESULT（2026-10-05 审计）。
 exec 9>"$LOCK"
 if [ -z "$DEV" ] || ! dev_ok "$DEV"; then
-  log "设备 $DEV 不可用 -> fail-safe 尝试满速"
-  flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
+  # I6：-c 判定失败的根因若是"节点被重建成普通文件"，echo > $DEV 这一写
+  # 只会成功地写进假节点 —— 不许记录"尝试满速"，必须点名危害与恢复命令。
+  if dev_is_regular_file; then
+    log_dev_hazard
+  else
+    log "设备 $DEV 不可用 -> fail-safe 尝试满速"
+    flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
+  fi
   exit 1
 fi
 LOG=${PFAN_LOG:-/var/log/pfand.log}
@@ -226,18 +248,27 @@ apply(){  # $1=目标值  $2=说明
     fi
 }
 
-# 启动对齐（读温失败时直接满速并跳过曲线）
+# 启动对齐：
+#  - T<0（读温失败）或 T>=EMERG：直接 setL 满速并【跳过曲线对齐】。
+#    绝不能让 apply() 代写：它把任何 >CAP 的目标钳到 CAP(70)，而 E=100 > CAP，
+#    所以 apply 的 `|| [ "$L" = "$E" ]` 永远不成立 —— 冷启动已过热(≥80C)时
+#    风扇会被压在 70% 停到第一个 IV 之后的应急分支才纠回 100%（I8，实测约 10s）。
+#    T<0 同理：want_for(-1) 命中 <=IDLE 返回 L0=25，apply 会把刚写的 100 覆盖成 25。
+#  - 其余走曲线对齐（微调基准 + apply 的启动写）。
 if [ "$T" -lt 0 ]; then
     log "启动时温度读取失败 -> fail-safe 满速 ${E}%"
-    base=$E
+    base=$E; trim=0
+    setL "$E"; written=$E
+elif [ "$T" -ge "$EMERG" ]; then
+    log "启动时 T=${T}C >= EMERG(${EMERG}C) -> 立即满速 ${E}%（绕过 apply 的 CAP 钳制）"
+    base=$E; trim=0
     setL "$E"; written=$E
 else
     tgt=$(want_for $T); base=$tgt
+    c=$(center_of "$base"); w=$(( (T - c) * GAIN ))
+    [ $w -gt $TRIM ] && w=$TRIM; [ $w -lt -$TRIM ] && w=$((-TRIM)); trim=$w
+    apply "$(want_for $T)" "启动"
 fi
-tgt=$(want_for $T); base=${base:-$tgt}
-c=$(center_of "$base"); w=$(( (T - c) * GAIN ))
-[ $w -gt $TRIM ] && w=$TRIM; [ $w -lt -$TRIM ] && w=$((-TRIM)); trim=$w
-apply "$(want_for $T)" "启动"
 
 # ⑬ 恢复应急锁定 —— 必须放在启动【对齐之后】：
 # 对齐会按 want_for(T) 写一次，若在它之前恢复，这次对齐会把满速覆盖成本档（77C -> 70%），

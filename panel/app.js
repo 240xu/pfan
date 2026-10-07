@@ -1,5 +1,6 @@
-import { checkTempOrder, dbOf, esc, fetchJson, fmtTemp, isStale,
-         rpmOf, statusText } from "/pfan-core.js";
+import { checkTempOrder, curveParamsHtml, curveRowsHtml, dbOf, esc,
+         fetchJson, fmtTemp, isStale, rpmOf, statusText,
+         DEFAULT_STALE_AGE, staleAgeLimit } from "/pfan-core.js";
 
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
@@ -19,12 +20,21 @@ async function j(u,o){
 
 /* ---------------- ⑰ 连接状态与数据新鲜度 ---------------- */
 let lastSnap=null;
+// 滞后阈值：由服务端 params.IV 派生（staleAgeLimit(2*IV)），不再写死 20s。
+// 默认回退 DEFAULT_STALE_AGE —— /api/curve 还没回来前按旧口径判。
+let STALE_AGE=DEFAULT_STALE_AGE;
+function why(e){ return (e&&e.message)||String(e); }
 function setConn(err){
   const e=document.getElementById("conn-st"); if(!e) return;
-  const t=statusText(lastSnap,20,err);
+  const t=statusText(lastSnap,STALE_AGE,err);
   e.textContent=t;
-  // 绿=实时；黄=滞后/缓存；红=取数失败
-  e.style.color = err ? "#f85149" : (t==="实时" ? "#3fb950" : "#d29922");
+  // 绿=实时（isStale=false）；黄=滞后/缓存/无数据；红=取数或写操作失败
+  e.style.color = err ? "#f85149" : (isStale(lastSnap,STALE_AGE) ? "#d29922" : "#3fb950");
+}
+function applyIV(iv){
+  const n=staleAgeLimit(iv);
+  if(n===STALE_AGE) return;
+  STALE_AGE=n; setConn(null);   // 阈值变了，立刻按新阈值重画状态条
 }
 async function pollNow(){
   try{
@@ -116,31 +126,41 @@ function buildLv(){
 }
 let MODE="daemon";
 let GUARD_TEMP=82;
+// ⑰ 写路径：这些是用户点下去在等结果的动作，失败必须给可见反馈（复用 #conn-st 状态条）。
+// 旧实现全是裸 await —— 网络抖一下按钮"点了没反应"，用户无从判断是没生效还是没发出去。
 async function setCurve(n){
-  const d=await j(API+"/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({profile:n})});
-  paint(d);
+  try{
+    const d=await j(API+"/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile:n})});
+    paint(d);
+  }catch(e){ setConn("切换曲线失败: "+why(e)); }
 }
 async function setLvl(v){
-  // 守护模式下先接管，否则 10 秒内会被自动改回
-  if(MODE!=="manual"){
-    await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({hold:true})});
-    MODE="manual";
-  }
-  const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({level:v})});
-  paint(d);
+  try{
+    // 守护模式下先接管，否则 10 秒内会被自动改回
+    if(MODE!=="manual"){
+      await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({hold:true})});
+      MODE="manual";
+    }
+    const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({level:v})});
+    paint(d);
+  }catch(e){ setConn("设置档位失败: "+why(e)); }
 }
 async function setHold(){
-  const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({hold:true})});
-  MODE="manual"; paint(d);
+  try{
+    const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({hold:true})});
+    MODE="manual"; paint(d);
+  }catch(e){ setConn("接管失败: "+why(e)); }
 }
 async function setAuto(){
-  const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({auto:true})});
-  MODE="daemon"; paint(d);
+  try{
+    const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({auto:true})});
+    MODE="daemon"; paint(d);
+  }catch(e){ setConn("交还守护失败: "+why(e)); }
 }
 
 function initCharts(h){
@@ -185,42 +205,37 @@ function initCharts(h){
 }
 
 async function refreshHist(){
-  const h=await j(API+"/api/history?hours=12");
-  if(!h.length) return;
-  const T=x=>x*1000;
-  if(!ch1){ initCharts(h); }
-  else{
-    ch1.data.datasets[0].data=h.filter(x=>x.temp!=null).map(x=>({x:T(x.ts),y:x.temp}));
-    ch1.data.datasets[1].data=h.filter(x=>x.level!=null).map(x=>({x:T(x.ts),y:x.level}));
-    ch1.update('none');
-    ch2.data.datasets[0].data=h.filter(x=>x.ec76!=null).map(x=>({x:T(x.ts),y:x.ec76}));
-    ch2.update('none');
-  }
-  const tb=document.querySelector("#hist tbody");
-  tb.innerHTML=h.slice(-14).reverse().map(x=>`<tr>
-    <td class="mono">${new Date(T(x.ts)).toLocaleTimeString("zh-CN",{hour12:false})}</td>
-    <td>${x.temp==null?"--":x.temp+"°C"}</td>
-    <td>${x.level==null?"--":x.level+"%"}</td>
-    <td>${x.ec76==null?"--":x.ec76+"%"}</td></tr>`).join("");
+  try{
+    const h=await j(API+"/api/history?hours=12");
+    if(!h.length) return;
+    const T=x=>x*1000;
+    if(!ch1){ initCharts(h); }
+    else{
+      ch1.data.datasets[0].data=h.filter(x=>x.temp!=null).map(x=>({x:T(x.ts),y:x.temp}));
+      ch1.data.datasets[1].data=h.filter(x=>x.level!=null).map(x=>({x:T(x.ts),y:x.level}));
+      ch1.update('none');
+      ch2.data.datasets[0].data=h.filter(x=>x.ec76!=null).map(x=>({x:T(x.ts),y:x.ec76}));
+      ch2.update('none');
+    }
+    const tb=document.querySelector("#hist tbody");
+    tb.innerHTML=h.slice(-14).reverse().map(x=>`<tr>
+      <td class="mono">${new Date(T(x.ts)).toLocaleTimeString("zh-CN",{hour12:false})}</td>
+      <td>${x.temp==null?"--":x.temp+"°C"}</td>
+      <td>${x.level==null?"--":x.level+"%"}</td>
+      <td>${x.ec76==null?"--":x.ec76+"%"}</td></tr>`).join("");
+  }catch(e){ setConn("刷新历史曲线失败: "+why(e)); }   // 以前在 setInterval 里裸抛 = 未捕获 rejection
 }
 
 async function renderCurve(cv){
   const cur=(typeof curLevel!=='undefined')?curLevel:null;
   const tb=document.querySelector('#cvtbl tbody');
+  // 行/参数文案的纯逻辑在 core.js（curveRowsHtml/curveParamsHtml），这里只负责挂到 DOM
   if(tb){
-    tb.innerHTML=(cv.bands||[]).map(b=>{
-      const act = cur!=null && Math.abs(cur-b.level)<=6 ? ' class="hi"' : '';
-      const mark=cur!=null&&Math.abs(cur-b.level)<=6?'◀ 现在':'';
-      return `<tr${act}><td>${b.emerg?'≥':'≤'}${b.upto}°C</td><td><b>${b.level}%</b></td>
-        <td class="mono">${b.rpm}</td><td class="mono">${b.db}</td><td>${mark}</td></tr>`;
-    }).join('');
+    tb.innerHTML=curveRowsHtml(cv.bands, cur);
   }
   const p=(cv&&cv.params)||{};
   const pn=document.getElementById('cvparams');
-  if(pn) pn.innerHTML =
-    `微调 ±<b>${p.TRIM??'-'}</b>（${p.GAIN??'-'}/°C，只快升慢降）· 上限 <b>${p.CAP??'-'}%</b> · `+
-    `应急 <b>${p.EMERG??'-'}°C</b>→100%，回落 ${p.EMERG_REL??'-'}°C 才解除 · `+
-    `死区 ${p.HYST??'-'}°C · 驻留 ${p.DWELL??'-'}s · 输出死区 ${p.DEAD??'-'} · 采样 ${p.IV??'-'}s`;
+  if(pn) pn.innerHTML = curveParamsHtml(p);
 
   // 曲线模式说明 + 按钮高亮
   const cv2=(cv&&cv.curve)||'auto';
@@ -251,58 +266,63 @@ async function renderCurve(cv){
 // ---- 散点图：温度 → 档位 ----
 let ch3=null;
 async function drawScatter(){
-  const only=document.getElementById('conly')?.checked;
-  const h=await j(API+"/api/history?hours=24"+(only?"&curve=1":""));
-  // 无条件剔除非法档位：0=释放控制、>100=越界
-  let pts=h.filter(x=>x.temp!=null&&x.level!=null&&x.level>0&&x.level<=100)
-              .map(x=>({x:x.temp,y:x.level}));
-  // 降采样：点太多浏览器会卡（每点一个 canvas 绘制指令）
-  const CAP=800;
-  if(pts.length>CAP){
-    const step=pts.length/CAP, out=[];
-    for(let i=0;i<CAP;i++) out.push(pts[Math.floor(i*step)]);
-    pts=out;
-  }
-  const cv=await j(API+"/api/curve");
-  // 理想阶梯曲线：每段从上一段档位水平延伸到本段上界
-  const bands=(cv.bands||[]).filter(b=>b.level>0);
-  const ideal=[];
-  let prev=null;
-  bands.forEach(b=>{
-    if(prev!==null&&prev!==b.level) ideal.push({x:b.upto,y:prev});
-    ideal.push({x:b.upto,y:b.level});
-    prev=b.level;
-  });
-  if(prev!==null) ideal.push({x:105,y:prev});
-  ideal.sort((a,b)=>a.x-b.x);
-  if(ch3){ch3.data.datasets[0].data=pts;ch3.data.datasets[1].data=ideal;ch3.update('none');return;}
-  ch3=new Chart(document.getElementById('ch3'),{type:'scatter',
-    data:{datasets:[
-      {label:'实测采样',data:pts,backgroundColor:'rgba(88,166,255,.45)',
-       pointRadius:1.5,borderWidth:0},
-      {label:'设定曲线（阶梯）',data:ideal,type:'line',borderColor:'#3fb550',
-       backgroundColor:'transparent',borderWidth:2,borderDash:[5,4],
-       pointRadius:0,showLine:true}]},
-    options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}},
-        tooltip:{callbacks:{label:c=>c.datasetIndex===1
-          ?`曲线 ≤${c.parsed.x}°C → ${c.parsed.y}%`
-          :`实测 ${c.parsed.x}°C → ${c.parsed.y}%`}},
-      scales:{x:{title:{display:true,text:'CPU 温度 °C',color:'#8b949e'},
-          ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:35,max:105},
-        y:{title:{display:true,text:'风扇档位 %',color:'#8b949e'},
-          ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:0,max:105}}}}});
+  // ⑰ 复选框切换 / renderCurve 收尾都会调它，失败不能变成未捕获 rejection
+  try{
+    const only=document.getElementById('conly')?.checked;
+    const h=await j(API+"/api/history?hours=24"+(only?"&curve=1":""));
+    // 无条件剔除非法档位：0=释放控制、>100=越界
+    let pts=h.filter(x=>x.temp!=null&&x.level!=null&&x.level>0&&x.level<=100)
+                .map(x=>({x:x.temp,y:x.level}));
+    // 降采样：点太多浏览器会卡（每点一个 canvas 绘制指令）
+    const CAP=800;
+    if(pts.length>CAP){
+      const step=pts.length/CAP, out=[];
+      for(let i=0;i<CAP;i++) out.push(pts[Math.floor(i*step)]);
+      pts=out;
+    }
+    const cv=await j(API+"/api/curve");
+    // 理想阶梯曲线：每段从上一段档位水平延伸到本段上界
+    const bands=(cv.bands||[]).filter(b=>b.level>0);
+    const ideal=[];
+    let prev=null;
+    bands.forEach(b=>{
+      if(prev!==null&&prev!==b.level) ideal.push({x:b.upto,y:prev});
+      ideal.push({x:b.upto,y:b.level});
+      prev=b.level;
+    });
+    if(prev!==null) ideal.push({x:105,y:prev});
+    ideal.sort((a,b)=>a.x-b.x);
+    if(ch3){ch3.data.datasets[0].data=pts;ch3.data.datasets[1].data=ideal;ch3.update('none');return;}
+    ch3=new Chart(document.getElementById('ch3'),{type:'scatter',
+      data:{datasets:[
+        {label:'实测采样',data:pts,backgroundColor:'rgba(88,166,255,.45)',
+         pointRadius:1.5,borderWidth:0},
+        {label:'设定曲线（阶梯）',data:ideal,type:'line',borderColor:'#3fb550',
+         backgroundColor:'transparent',borderWidth:2,borderDash:[5,4],
+         pointRadius:0,showLine:true}]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}},
+          tooltip:{callbacks:{label:c=>c.datasetIndex===1
+            ?`曲线 ≤${c.parsed.x}°C → ${c.parsed.y}%`
+            :`实测 ${c.parsed.x}°C → ${c.parsed.y}%`}},
+        scales:{x:{title:{display:true,text:'CPU 温度 °C',color:'#8b949e'},
+            ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:35,max:105},
+          y:{title:{display:true,text:'风扇档位 %',color:'#8b949e'},
+            ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:0,max:105}}}}});
+  }catch(e){ setConn("刷新散点图失败: "+why(e)); }
 }
 
 async function renderEvents(){
-  const e=await j(API+"/api/events?limit=40");
-  const kind={curve:'曲线',mode:'模式',guard:'看门狗'};
-  const col={curve:'#58a6ff',mode:'#d29922',guard:'#f85149'};
-  document.querySelector('#ev tbody').innerHTML = e.length ? e.map(x=>
-    `<tr><td class="mono">${new Date(x.ts*1000).toLocaleString('zh-CN',{hour12:false})}</td>
-     <td style="color:${col[x.kind]||'#8b949e'}">${kind[x.kind]||x.kind}</td>
-     <td>${x.msg}</td></tr>`).join('')
-    : '<tr><td colspan=3 style="color:#8b949e">暂无事件</td></tr>';
+  try{
+    const e=await j(API+"/api/events?limit=40");
+    const kind={curve:'曲线',mode:'模式',guard:'看门狗'};
+    const col={curve:'#58a6ff',mode:'#d29922',guard:'#f85149'};
+    document.querySelector('#ev tbody').innerHTML = e.length ? e.map(x=>
+      `<tr><td class="mono">${new Date(x.ts*1000).toLocaleString('zh-CN',{hour12:false})}</td>
+       <td style="color:${col[x.kind]||'#8b949e'}">${kind[x.kind]||x.kind}</td>
+       <td>${x.msg}</td></tr>`).join('')
+      : '<tr><td colspan=3 style="color:#8b949e">暂无事件</td></tr>';
+  }catch(e){ setConn("刷新事件流失败: "+why(e)); }
 }
 
 const ED_KEYS=[
@@ -319,12 +339,15 @@ const ED_KEYS=[
 let ED=null;
 
 async function openEditor(){
-  const r=await j(API+"/api/params");
-  ED={params:{...r.params}, src:r.params};
-  document.getElementById('ed-src').textContent=r.conf;
-  renderEditor();
-  document.getElementById('editor').style.display='';
-  document.getElementById('editor').scrollIntoView({behavior:'smooth'});
+  try{
+    const r=await j(API+"/api/params");
+    ED={params:{...r.params}, src:r.params};
+    applyIV(r.params&&r.params.IV);   // 运维刚改过 IV？编辑器打开时同步阈值
+    document.getElementById('ed-src').textContent=r.conf;
+    renderEditor();
+    document.getElementById('editor').style.display='';
+    document.getElementById('editor').scrollIntoView({behavior:'smooth'});
+  }catch(e){ setConn("打开参数编辑器失败: "+why(e)); }   // 编辑器还没弹出来，只能走状态条
 }
 function closeEditor(){document.getElementById('editor').style.display='none';}
 function resetParams(){ED.params={...ED.src};renderEditor();msg('已恢复为当前生效值（未保存）','#8b949e');}
@@ -336,7 +359,10 @@ function renderEditor(){
   const rows=[];
   for(let i=0;i<6;i++){
     const tk=i===0?'IDLE':'T'+i, lk=i===0?'L0':'L'+i;
-    const rpm=Math.round((p[lk]||0)*120), db=((p[lk]||0)*0.5).toFixed(1);
+    // ②⑧/复审 I7：这里曾用 (lvl*120) 与 (lvl*0.5) 硬算 —— 70% 显示 8400 而权威表是 9300。
+    // 与主曲线表同源：window.FPS 由 boot() 从 /api/levels 填入。
+    const _lv=parseInt(p[lk],10);
+    const rpm=rpmOf(_lv,window.FPS) ?? '—', db=dbOf(_lv,window.FPS) ?? '—';
     rows.push(`<tr>
       <td><input type="number" id="e_${tk}" value="${p[tk]}" min="-20" max="110" style="width:70px"></td>
       <td><input type="number" id="e_${lk}" value="${p[lk]}" min="0" max="120" style="width:70px"></td>
@@ -373,19 +399,22 @@ function preview(){
   msg('✓ 校验通过，点保存生效','#3fb950');
 }
 async function saveParams(){
-  const o=readEditor();
-  msg('保存中…','#8b949e');
-  const r=await j(API+"/api/params",{method:'POST',
-    headers:{"Content-Type":"application/json"},body:JSON.stringify({params:o})});
-  if(r.ok){
-    ED.src={...r.params};
-    msg('✓ 已保存并重启守护','#3fb950');
-    renderEditor();
-    if(window.CURVE) renderCurve(r);
-    setTimeout(()=>{document.getElementById('editor').style.display='none';},1200);
-  } else {
-    msg('✗ '+((r.errors||[]).join('；')),'#f85149');
-  }
+  try{
+    const o=readEditor();
+    msg('保存中…','#8b949e');
+    const r=await j(API+"/api/params",{method:'POST',
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({params:o})});
+    if(r.ok){
+      ED.src={...r.params};
+      applyIV(r.params&&r.params.IV);   // IV 可能被改了 → 滞后阈值跟着换
+      msg('✓ 已保存并重启守护','#3fb950');
+      renderEditor();
+      if(window.CURVE) renderCurve(r);
+      setTimeout(()=>{document.getElementById('editor').style.display='none';},1200);
+    } else {
+      msg('✗ '+((r.errors||[]).join('；')),'#f85149');
+    }
+  }catch(e){ msg('✗ 保存失败: '+why(e),'#f85149'); }   // 编辑器可见，用它自己的消息行
 }
 
 async function boot(){
@@ -402,6 +431,7 @@ async function boot(){
     const pf=await j(API+"/api/profile");
     GUARD_TEMP=pf.guard_temp||82;
     window.CURVE=await j(API+"/api/curve");
+    applyIV(window.CURVE&&window.CURVE.params&&window.CURVE.params.IV);   // M3: 阈值随 IV
     renderCurve(window.CURVE||{params:{},bands:[]});
   }catch(e){
     setConn(e&&e.message||String(e));

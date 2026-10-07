@@ -13,12 +13,19 @@
 
 ## 鉴权与 CSRF
 
-- **写接口**（`POST /api/level`、`POST /api/curve` …）必须带 `X-Pfan-Token`。
-  实测：无 token → **403**。令牌 30 字节随机数，文件 `/var/lib/pfanel/token`，`600 root:root`。
+- **写接口**（`POST /api/level`、`POST /api/curve` …）**必须**带有效的 `X-Pfan-Token`，
+  **无条件** —— Origin 白名单**不能替代** token（旧版是「token 或白名单 Origin」二选一，
+  同主机**任意端口**的页面都能免 token 写，已废除；`tests/python/test_http.py` 的
+  `test_write_requires_token_even_from_allowed_origin` 钉住这一条）。实测：无 token → **403**；
+  **不带 Origin** 的请求（如 curl）只看 token，有效即放行。令牌 30 字节随机数，
+  文件 `/var/lib/pfanel/token`，`600 root:root`。
 - **读接口**（`/api/now`、`/api/curve`、`/api/events`）**免鉴权，这是有意的**：
   它们只返回本机温度/档位/历史，不含任何凭据。不要往这些字段里塞密钥。
-- **Origin 白名单**（`PFAN_ORIGIN_ALLOW`，默认 `pfan.example.com,127.0.0.1,localhost,192.168.1.10`）。
-  白名单值由 `tests/python/test_http.py` 断言等于生产值，改配置是可选的。
+- **Origin 白名单**（`PFAN_ORIGIN_ALLOW`，默认 `pfan.example.com,127.0.0.1,localhost,192.168.1.10`）
+  是 token 之上的**第二道门（纵深防御）**：请求**带了** `Origin` 时还必须在白名单里，否则 403。
+  白名单**只比对主机名**（scheme 与端口一律忽略）—— 这正是它不能当鉴权用的原因，
+  也是旧版二选一规则的漏洞所在。白名单值由 `tests/python/test_http.py` 断言等于生产值，
+  改配置是可选的。
 - **不发 CORS 头**。面板与 API 同源，通配 `Access-Control-Allow-Origin: *` 只会让
   LAN 内任意网页跨域读遥测 —— 已移除，`scripts/smoke.sh` 2b 段守着。
 
@@ -36,9 +43,9 @@
 - 无 PII，无凭据入库或入日志。
 - `/var/lib/pfanel/pfanel.db`（644）只存温度/档位采样与事件；`/etc/pfand.conf`（644）只存曲线参数。
 - 唯一的秘密是 token（600）。
-- `/var/log/pfand.log` 由 logrotate 每日轮转、保留 7 份（`deploy/logrotate.d/pfan`）。
-  配置必须是 **`copytruncate`**：pfand 用 `>>` 追加且没有信号处理，普通轮转会让它的
-  fd 继续指向被移走的文件，之后的日志全部丢失。
+- `/var/log/pfand.log` 与 `/var/log/pfanel.log` 由 logrotate 每日轮转、保留 7 份
+  （`deploy/logrotate.d/pfan`）。两份配置都必须是 **`copytruncate`**：pfand/pfanel 都用 `>>`
+  追加且没有信号处理，普通轮转会让它的 fd 继续指向被移走的文件，之后的日志全部丢失。
 
 ## 已知并接受的限制
 

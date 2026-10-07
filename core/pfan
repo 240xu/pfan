@@ -18,6 +18,14 @@ PLAT_CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 # 单测用 PFAN_DEV=/dev/null + PFAN_LOCK=<临时文件> 覆盖。生产从不设置。
 DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
 LOCK="${PFAN_LOCK:-/run/pfanel.lock}"
+# dmesg 读取接缝（约定同 core/pfand：PFAN_DMESG，缺省 dmesg）。生产从不设置：
+# 未设置时执行 `sudo -n dmesg` —— 与历史行为完全一致（pfan 直读 dmesg 可能被
+# dmesg_restrict 拦）；设置后直接执行该命令 —— 测试/冒烟用它指向伪 dmesg，免 root。
+# run()/acpi_ok() 里每一处 dmesg 读取都走 dmesg_out，不再各自硬编码 sudo -n dmesg。
+DMESG="${PFAN_DMESG:-dmesg}"
+dmesg_out(){
+  if [ -n "${PFAN_DMESG:-}" ]; then "$DMESG"; else sudo -n "$DMESG"; fi
+}
 F=""
 need_F(){   # 懒加载：detect 不需要 F（新机器上 platform.conf 还不存在）
   [ -n "$F" ] && return 0
@@ -46,16 +54,16 @@ acquire(){
 # ⑤ 等新 RESULT 行，否则会读到上一次调用留下的旧值
 run(){
   local before after
-  before=$(sudo -n dmesg | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+  before=$(dmesg_out | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
   echo "$1 0" > "$DEV"
   local i=0
   while [ $i -lt 20 ]; do
     sleep 0.12; i=$((i+1))
-    after=$(sudo -n dmesg | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+    after=$(dmesg_out | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
     [ -n "$after" ] && [ -n "$before" ] && \
       awk -v a="$after" -v b="$before" 'BEGIN{exit !(a>b)}' && break
   done
-  sudo -n dmesg | grep "pfanctl: RESULT" | tail -1
+  dmesg_out | grep "pfanctl: RESULT" | tail -1
   flock -u 8
 }
 
@@ -66,11 +74,11 @@ acpi_ok(){
   need_dev || return 1
   if ! exec 8>"$LOCK" 2>/dev/null; then return 1; fi
   flock -x 8 || return 1
-  before=$(sudo -n dmesg 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+  before=$(dmesg_out 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
   echo "$1 0" > "$DEV" 2>/dev/null || { flock -u 8; return 1; }
   while [ $i -lt 20 ]; do
     sleep 0.12; i=$((i+1))
-    after=$(sudo -n dmesg 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
+    after=$(dmesg_out 2>/dev/null | grep "pfanctl: RESULT" | tail -1 | awk -F'[][]' '{print $2}')
     if [ -n "$after" ] && { [ -z "$before" ] || awk -v a="$after" -v b="$before" 'BEGIN{exit !(a>b)}'; }; then
       got=1; break
     fi

@@ -72,8 +72,21 @@ export async function fetchJson(url, opts, fetchImpl) {
   }
 }
 
-/** ⑰ 快照是否已过期：服务端标了 cached，或 age 超过采样周期(10s)的两倍。 */
-export function isStale(d, maxAge = 20) {
+/** 滞后判定的默认阈值（秒）：IV 缺失/非法时的回退 = 20，即默认 IV=10 的两倍。 */
+export const DEFAULT_STALE_AGE = 20;
+/** 阈值下限：validate_params 允许 IV=2，2*IV=4 秒会一采样就报"滞后"，太敏感。 */
+const MIN_STALE_AGE = 10;
+
+/** 按服务端下发的采样周期 IV 推导滞后阈值：2*IV（与旧行为 IV=10 -> 20s 一致）。
+ *  IV 存在 /etc/pfand.conf、运维可改；硬编码 20 会在 IV=30 时永久报"数据滞后"。 */
+export function staleAgeLimit(iv) {
+  const n = Number(iv);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_STALE_AGE;
+  return Math.max(MIN_STALE_AGE, 2 * n);
+}
+
+/** ⑰ 快照是否已过期：服务端标了 cached，或 age 超过阈值（调用方用 staleAgeLimit(IV) 算）。 */
+export function isStale(d, maxAge = DEFAULT_STALE_AGE) {
   if (!d) return true;
   if (d.cached) return true;
   if (typeof d.age === "number" && d.age > maxAge) return true;
@@ -81,7 +94,7 @@ export function isStale(d, maxAge = 20) {
 }
 
 /** ⑰ 状态条文案：实时 / 数据滞后 / 缓存 / 中断。err 非空时优先显示错误原因。 */
-export function statusText(d, maxAge = 20, err = null) {
+export function statusText(d, maxAge = DEFAULT_STALE_AGE, err = null) {
   if (err) return "⚠ " + err;
   if (!d) return "⚠ 无数据（连接中断？）";
   if (d.cached) return "缓存快照（服务端未实时刷新）";
@@ -89,4 +102,23 @@ export function statusText(d, maxAge = 20, err = null) {
     return "数据滞后 " + Math.round(d.age) + "s（采样中断？）";
   }
   return "实时";
+}
+
+/** M5 前端曲线渲染的纯部分（原 renderCurve 内联）：档位表行 HTML。
+ *  cur 为当前档位（null=还没读到，不高亮）；±6 视为"正在这一档附近"。 */
+export function curveRowsHtml(bands, cur) {
+  return (bands || []).map(b => {
+    const hi = cur != null && Math.abs(cur - b.level) <= 6;
+    return `<tr${hi ? ' class="hi"' : ''}><td>${b.emerg ? '≥' : '≤'}${b.upto}°C</td>` +
+      `<td><b>${b.level}%</b></td>\n        <td class="mono">${b.rpm}</td>` +
+      `<td class="mono">${b.db}</td><td>${hi ? '◀ 现在' : ''}</td></tr>`;
+  }).join('');
+}
+
+/** M5 参数摘要行：缺字段一律 '-'，不许把 undefined 画到面板上。 */
+export function curveParamsHtml(p) {
+  p = p || {};
+  return `微调 ±<b>${p.TRIM ?? '-'}</b>（${p.GAIN ?? '-'}/°C，只快升慢降）· 上限 <b>${p.CAP ?? '-'}%</b> · ` +
+    `应急 <b>${p.EMERG ?? '-'}°C</b>→100%，回落 ${p.EMERG_REL ?? '-'}°C 才解除 · ` +
+    `死区 ${p.HYST ?? '-'}°C · 驻留 ${p.DWELL ?? '-'}s · 输出死区 ${p.DEAD ?? '-'} · 采样 ${p.IV ?? '-'}s`;
 }

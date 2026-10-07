@@ -2,6 +2,7 @@
 
 导入 pfanel 前必须给平台配置，否则模块级加载会按设计快速失败（P1 的 I4 修复）。
 """
+import json
 import os
 import socket
 import threading
@@ -57,18 +58,15 @@ def test_state_seam_defaults_equal_production():
             "平台配置里的 DEV 不是 /dev/pfanctl（生产值变了？）"
 
 
-def _free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+def _serve(port=0):
+    """在端口 0 上绑定，回传【内核分配的真实端口】。
 
-
-def _serve(port):
+    旧做法是先 bind 再 close 拿到一个空闲端口、随后拿它去开服务器 —— close 与重开之间
+    有窗口，别人可以占走它，用例于是间歇性失败。这条 flaky 曾让 pre-push 随机拒绝推送。
+    让内核直接挑端口（port=0）再从 server_address 读回，窗口就不存在了。"""
     srv = pfanel.Server(("127.0.0.1", port), pfanel.H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv
+    return srv, srv.server_address[1]
 
 
 # ---------------- ②⑤ Origin 白名单 ----------------
@@ -107,8 +105,7 @@ def test_origin_allowlist_is_configurable():
 
 def test_api_has_no_wildcard_cors():
     """②⑦：面板是同源的，`Access-Control-Allow-Origin: *` 只会让任意网页跨域读遥测。"""
-    port = _free_port()
-    srv = _serve(port)
+    srv, port = _serve()
     try:
         r = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/now", timeout=10)
         acao = r.headers.get("Access-Control-Allow-Origin")
@@ -119,8 +116,7 @@ def test_api_has_no_wildcard_cors():
 
 
 def test_api_still_serves_json_shape():
-    port = _free_port()
-    srv = _serve(port)
+    srv, port = _serve()
     try:
         r = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/now", timeout=10)
         assert r.headers.get("Content-Type", "").startswith("application/json")
@@ -141,8 +137,7 @@ def test_server_has_daemon_threads():
 
 def test_unauthorized_post_is_still_rejected():
     """收紧 CORS/白名单后，写接口的鉴权不能松。"""
-    port = _free_port()
-    srv = _serve(port)
+    srv, port = _serve()
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/level",
@@ -195,8 +190,7 @@ def test_snapshot_fps_not_null_for_valid_level():
     # 而 level=0 是 falsy，走 `if lvl` 分支照样返回 None —— 那是另一个 case，不是 ②⑥。
     with open(os.environ["PFAN_DMESG_STATE"], "w", encoding="utf-8") as fh:
         fh.write("42")
-    port = _free_port()
-    srv = _serve(port)
+    srv, port = _serve()
     try:
         r = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/now", timeout=15)
         body = __import__("json").loads(r.read().decode())
@@ -217,8 +211,7 @@ def test_curve_view_uses_shared_fps_table():
     import pfan_core
     with open(os.environ["PFAN_CONF"], "w", encoding="utf-8") as fh:
         fh.write(_CURVE_CONF)
-    port = _free_port()
-    srv = _serve(port)
+    srv, port = _serve()
     try:
         r = urllib.request.urlopen(f"http://127.0.0.1:{port}/api/curve", timeout=15)
         cv = __import__("json").loads(r.read().decode())
@@ -238,3 +231,102 @@ def test_curve_view_uses_shared_fps_table():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ---------------- C1: 写接口鉴权的真实规则 ----------------
+# SECURITY.md 承诺「写接口必须带 X-Pfan-Token」，但代码曾是 `token 或 Origin 白名单`：
+# Origin 只比对主机名、忽略端口与协议 → 同主机【任意端口】上的页面都能免 token 写。
+# 面板始终注入 token（app.js:5），这条宽限没有存在理由。
+
+def _post(port, token=None, origin=None, level=50):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/level",
+        data=json.dumps({"level": level}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    if token is not None:
+        req.add_unredirected_header("X-Pfan-Token", token)
+    if origin is not None:
+        req.add_unredirected_header("Origin", origin)
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        return 200
+    except HTTPError as e:
+        return e.code
+
+
+def test_write_requires_token_even_from_allowed_origin():
+    """C1：白名单 Origin 不能替代 token —— 主机名匹配会放过同主机任意端口的页面。"""
+    srv, port = _serve()
+    try:
+        assert _post(port, token=None, origin="http://localhost:9999") == 403, \
+            "无 token + localhost Origin 竟然放行了（主机名匹配，端口被忽略）"
+        assert _post(port, token=None, origin="http://192.168.1.10:8080") == 403, \
+            "无 token + 本机任意端口 Origin 竟然放行了"
+        assert _post(port, token=None, origin="https://pfan.example.com") == 403, \
+            "无 token + 白名单 Origin 竟然放行了"
+        assert _post(port, token=None) == 403, "无 token 必须 403"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_write_with_valid_token_is_accepted():
+    srv, port = _serve()
+    try:
+        tok = pfanel.get_token()
+        assert tok, "拿不到 token，无法验证放行路径"
+        # 带白名单 Origin（面板就是这样发的）
+        assert _post(port, token=tok, origin="http://127.0.0.1:%d" % port) == 200, \
+            "有效 token + 自身 Origin 应放行"
+        # 不带 Origin（curl）
+        assert _post(port, token=tok) == 200, "有效 token 无 Origin 应放行"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_write_with_valid_token_but_foreign_origin_is_rejected():
+    """纵深防御：即使 token 对，陌生 Origin 也要拒（说明白名单仍在生效）。"""
+    srv, port = _serve()
+    try:
+        tok = pfanel.get_token()
+        assert _post(port, token=tok, origin="http://evil.example") == 403, \
+            "有效 token 但陌生 Origin 应被白名单拒绝"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# ---------------- I2: ACAO 头必须【完全不存在】 ----------------
+
+def test_api_must_not_send_any_acao_header():
+    """C2/②⑦：只断言 != '*' 会放过反射型 ACAO（浏览器同样可跨域读）。"""
+    srv, port = _serve()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/now",
+            headers={"Origin": "http://evil.example"},
+        )
+        r = urllib.request.urlopen(req, timeout=10)
+        acao = r.headers.get("Access-Control-Allow-Origin")
+        assert acao is None, f"不应发任何 ACAO 头，实测: {acao!r}"
+        assert r.headers.get("Access-Control-Allow-Credentials") is None
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# ---------------- I4: ⑯ 必须钉住 __main__ 真的用了 Server ----------------
+# 只断言类属性 `Server.daemon_threads is True` 不够：把 __main__ 改回裸
+# socketserver.ThreadingTCPServer(...)，缺陷原样回来而测试全绿。
+
+def test_main_instantiates_the_daemon_server():
+    import inspect
+    src = inspect.getsource(pfanel)
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert "with Server((" in main, \
+        "__main__ 没有实例化 pfanel.Server —— daemon_threads 形同虚设"
+    assert "socketserver.ThreadingTCPServer((" not in main, \
+        "__main__ 用回了裸 ThreadingTCPServer（daemon_threads=False，shutdown 会挂住）"

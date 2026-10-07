@@ -87,4 +87,54 @@ elif [ $rc -ne 0 ]; then
   [ -s "$T/pfand.log" ] && ok "有日志: $(tail -1 "$T/pfand.log" | cut -c1-64)" || ng "没有日志"
 fi
 
+# ---- I6：DEV 是普通文件 = 文档化的事故形态（2026-10-06）----
+# rmmod 删掉节点后，一条 `echo … > /dev/pfanctl` 把它重建成普通文件，
+# 之后所有读写被静默丢弃 ~2min。dev_ok 的 -c 判定会失败，但下一行
+# `echo … > "$DEV"` 却"成功"—— 两个 fail-safe 分支于是记录出永远到不了硬件的
+# 满速尝试。必须：点名危害 + 给恢复命令、不声称尝试过写入、文件里不留字节。
+# 注意必须 PFAN_DEV 不设（走平台配置 + dev_ok 的 -c 分支），否则就是测试接缝的语义了。
+mkplat_hazard(){ # mkplat_hazard <conf文件> <普通设备文件> [只留DEV]
+  if [ "${3:-}" = devonly ]; then
+    printf 'DEV=%s\n' "$2" > "$1"
+  else
+    printf 'EC_ROOT=\\_SB.PCI0.LPCB.EC0\nFAN_DEVICE=\\_SB.PCI0.LPCB.EC0.TFN1\nTHERMAL_ZONE=/sys/class/thermal/thermal_zone0/temp\nDEV=%s\nEC_CMD=0xB5\n' "$2" > "$1"
+  fi
+}
+chk_hazard(){ # chk_hazard <日志文件> <普通设备文件> <场景名> <rc>
+  local logf="$1" devf="$2" name="$3" rc="$4"
+  if [ "$rc" -eq 0 ]; then ng "$name: rc=0（fail-safe 必须非零退出让 systemd 重试）"; return; fi
+  if grep -q 'CRITICAL' "$logf" 2>/dev/null && grep -q 'rm -f' "$logf" 2>/dev/null; then
+    ok "$name: 点名危害+恢复命令: $(grep 'CRITICAL' "$logf" | tail -1 | cut -c1-96)"
+  else
+    ng "$name: 没有 CRITICAL 危害日志: $(tail -1 "$logf" 2>/dev/null | cut -c1-96)"
+  fi
+  if grep -q '尝试满速\|已写满速' "$logf" 2>/dev/null; then
+    ng "$name: 仍声称尝试/完成写入（到不了硬件的假话）: $(grep '尝试满速\|已写满速' "$logf" | tail -1)"
+  else
+    ok "$name: 没有虚假的写入声明"
+  fi
+  if [ -s "$devf" ]; then
+    ng "$name: 普通文件里被写进了 $(( $(wc -c < "$devf") )) 字节（写入被静默丢弃却当成成功）"
+  else
+    ok "$name: 未向普通文件写入任何字节"
+  fi
+}
+
+echo "== T8: 平台 DEV 是普通文件 —— dev_ok(-c) 失败后不得声称满速写入（I6）=="
+: > "$T/hzdev"
+mkplat_hazard "$T/hz.conf" "$T/hzdev"
+rm -f "$T/hz.log"
+out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/hz.conf" PFAN_LOCK="$T/lock" PFAN_LOG="$T/hz.log" \
+      bash core/pfand 2>&1); rc=$?
+[ -n "${PFAN_DEV:-}" ] && ng "测试环境泄了 PFAN_DEV（会让 dev_ok 走 -e 接缝而不是 -c）"
+chk_hazard "$T/hz.log" "$T/hzdev" "平台DEV普通文件" $rc
+
+echo "== T9: 平台配置缺键且 DEV 是普通文件 —— 候选 fail-safe 分支同样不许假报已写满速（I6）=="
+: > "$T/hzdev2"
+mkplat_hazard "$T/hz2.conf" "$T/hzdev2" devonly
+rm -f "$T/hz.log2"
+out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/hz2.conf" PFAN_LOCK="$T/lock" PFAN_LOG="$T/hz.log2" \
+      bash core/pfand 2>&1); rc=$?
+chk_hazard "$T/hz.log2" "$T/hzdev2" "候选分支普通文件" $rc
+
 echo "test_control_paths: fails=$fails"; exit "$fails"

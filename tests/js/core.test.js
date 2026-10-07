@@ -170,3 +170,242 @@ describe("app.js 轮询必须有错误保护（⑰）", () => {
     expect(src).toMatch(/async function boot\(\)\s*\{[\s\S]*?try\{[\s\S]*?\}catch\(/);
   });
 });
+
+// 只看代码行：注释里解释"这里曾用 *120"是正常写法，匹配它只是假阳性
+// （与 test_panel_split 的 DOM 守卫同一类问题，那次已踩过）。
+function codeOnly(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
+describe("曲线编辑器预览必须用权威表（②⑧ 复审 I7）", () => {
+  test("代码里不再出现 *120 / *0.5 的近似公式", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).not.toMatch(/\*\s*120\b/);
+    expect(code).not.toMatch(/\*\s*0\.5\b/);
+  });
+  test("编辑器渲染改走 rpmOf/dbOf", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/rpmOf\(/);
+    expect(code).toMatch(/dbOf\(/);
+  });
+});
+
+// ================= 复审 M1..M5 =================
+
+/** 从源码抠出某个函数的完整函数体（数大括号）。
+ *  写路径守卫逐函数检查 try/catch —— 比"整文件搜 try"可靠，
+ *  也能防止"只给其中一个函数加了 catch"就蒙混过关。 */
+function fnBody(src, name) {
+  const m = src.match(new RegExp("function\\s+" + name + "\\s*\\("));
+  if (!m) return null;
+  const start = src.indexOf("{", m.index);
+  if (start < 0) return null;
+  let depth = 0;
+  for (let k = start; k < src.length; k++) {
+    if (src[k] === "{") depth++;
+    else if (src[k] === "}") {
+      depth--;
+      if (depth === 0) return src.slice(start, k + 1);
+    }
+  }
+  return null;
+}
+
+describe("M1: isStale 必须真正参与渲染（不能是死 import）", () => {
+  test("代码行里真的调用了 isStale( 快照", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/isStale\(\s*lastSnap/);
+  });
+
+  test("状态条颜色由 isStale 决定，而不是跟文案字符串比相等", async () => {
+    const body = fnBody(codeOnly(await appSrc()), "setConn");
+    expect(body, "找不到 setConn").toBeTruthy();
+    expect(body).toMatch(/isStale\(/);
+    expect(body).not.toMatch(/t\s*===\s*["']实时["']|["']实时["']\s*===\s*t/);
+  });
+});
+
+describe("M2: 写路径/用户动作必须把失败反馈给用户（⑰ 遗留缺口）", () => {
+  // 覆盖：档位/曲线按钮（用户点了在等结果）、编辑器读写、
+  // 以及 boot 起的两个后台刷新（以前在 setInterval 里裸抛 = 未捕获 rejection）
+  const WRITE_FNS = ["setLvl", "setCurve", "setHold", "setAuto",
+                     "saveParams", "openEditor", "refreshHist",
+                     "renderEvents", "drawScatter"];
+
+  test("每个写路径都有 try{…}catch，并把错误交给已有的 setConn()/msg()", async () => {
+    const code = codeOnly(await appSrc());
+    for (const name of WRITE_FNS) {
+      const body = fnBody(code, name);
+      expect(body, `找不到 function ${name}（被改名或删除？）`).toBeTruthy();
+      expect(body, `${name} 失败时必须走 setConn()/msg()，不能静默`).toMatch(
+        /catch\s*\([^)]*\)\s*\{[^}]*(setConn|msg)\(/);
+      expect(body, `${name} 必须有被保护的 await`).toMatch(/try\s*\{[\s\S]*await\s+j\(/);
+    }
+  });
+
+  test("不能靠删掉 await 来“修”错误处理", async () => {
+    const code = codeOnly(await appSrc());
+    expect(fnBody(code, "setLvl")).toMatch(/await\s+j\(/);
+    expect(fnBody(code, "saveParams")).toMatch(/await\s+j\(/);
+    expect(fnBody(code, "openEditor")).toMatch(/await\s+j\(/);
+  });
+});
+
+describe("M3: 滞后阈值随服务端 IV，不再硬编码 20s", () => {
+  // 动态 import：新函数尚不存在（RED 阶段）时只红这一条，
+  // 不像静态 import 缺 export 那样让整个测试文件收集失败。
+  const core = () => import("../../panel/core.js");
+
+  test("IV=30（运维可改 /etc/pfand.conf）→ 阈值 60s：45s 实时，61s 滞后", async () => {
+    const c = await core();
+    const lim = c.staleAgeLimit(30);
+    expect(lim).toBe(60);
+    expect(isStale({ temp: 50, cached: false, age: 45 }, lim)).toBe(false);
+    expect(isStale({ temp: 50, cached: false, age: 61 }, lim)).toBe(true);
+    expect(statusText({ temp: 50, cached: false, age: 45 }, lim)).toMatch(/实时/);
+    expect(statusText({ temp: 50, cached: false, age: 61 }, lim)).toMatch(/滞后/);
+  });
+
+  test("IV 缺失/非法 → 回退默认 20s（与硬编码时代的判定一致）", async () => {
+    const c = await core();
+    for (const bad of [undefined, null, 0, -5, "abc", NaN]) {
+      expect(c.staleAgeLimit(bad), String(bad)).toBe(20);
+    }
+    const lim = c.staleAgeLimit(undefined);
+    expect(isStale({ temp: 50, cached: false, age: 5 }, lim)).toBe(false);
+    expect(isStale({ temp: 50, cached: false, age: 32 }, lim)).toBe(true);
+    expect(statusText({ temp: 50, cached: false, age: 32 }, lim)).toMatch(/32/);
+  });
+
+  test("IV=10 默认值 → 阈值仍是 20（向后兼容）", async () => {
+    const c = await core();
+    expect(c.staleAgeLimit(10)).toBe(20);
+  });
+
+  test("IV=2（validate_params 允许的下限）→ 有下限保护，不会 4s 就报滞后", async () => {
+    const c = await core();
+    expect(c.staleAgeLimit(2)).toBeGreaterThanOrEqual(10);
+    expect(isStale({ temp: 50, cached: false, age: 9 }, c.staleAgeLimit(2))).toBe(false);
+  });
+
+  test("app.js: setConn 用 STALE_AGE，函数体里不再出现写死的 20", async () => {
+    const code = codeOnly(await appSrc());
+    const body = fnBody(code, "setConn");
+    expect(body, "找不到 setConn").toBeTruthy();
+    expect(body).toMatch(/STALE_AGE/);
+    expect(body).not.toMatch(/\b20\b/);
+    expect(code).toMatch(/staleAgeLimit\(/);
+  });
+
+  test("app.js: boot / 打开编辑器 / 保存参数都会把服务端 IV 灌给阈值", async () => {
+    const code = codeOnly(await appSrc());
+    const calls = code.match(/applyIV\(/g) || [];   // 定义 + >= 2 个调用点
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("M4: FPS fixture 不许与权威表（server/pfan_core.py）漂移", () => {
+  // 单一事实源 = server/pfan_core.py::FPS（/api/levels 运行时也从它出）。
+  // vitest 没法 import python，所以让 python3 把权威表 + nearest_fps 的
+  // 判定结果吐成 JSON，和 JS fixture / nearestFpsEntry 逐项对拍。
+  async function pyFps() {
+    const { execFileSync } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const serverDir = fileURLToPath(new URL("../../server", import.meta.url));
+    const py = [
+      "import json,sys",
+      `sys.path.insert(0,${JSON.stringify(serverDir)})`,
+      "from pfan_core import FPS, nearest_fps",
+      "levels=[25,26,35,42,45,50,60,65,70,80,85,90,95,100]",
+      'print(json.dumps({"fps":{str(k):list(v) for k,v in FPS.items()},'
+        + '"near":{str(l):list(nearest_fps(l)) for l in levels}}))',
+    ].join(";");
+    return JSON.parse(execFileSync("python3", ["-c", py], { encoding: "utf8" }));
+  }
+
+  test("fixture 与 pfan_core.FPS 完全一致（含键集合，谁漂移谁红）", async () => {
+    expect(FPS).toEqual((await pyFps()).fps);
+  });
+
+  test("表外档位：js nearestFpsEntry 与 py nearest_fps 同值", async () => {
+    const near = (await pyFps()).near;
+    for (const [k, v] of Object.entries(near)) {
+      const lvl = Number(k);
+      expect(rpmOf(lvl, FPS), `level ${lvl}`).toBe(v[0]);
+      expect(dbOf(lvl, FPS), `level ${lvl}`).toBe((v[1] / 1000).toFixed(1));
+    }
+  });
+
+  test("平局取先出现的键（两边都在升序键上保留第一个最小值）", async () => {
+    const near = (await pyFps()).near;
+    // 45 与 40/50 等距、65 与 60/70 等距：py min() 与 js 的严格 < 比较都留低键
+    expect(near["45"][0]).toBe(5100);
+    expect(rpmOf(45, FPS)).toBe(5100);
+    expect(rpmOf(65, FPS)).toBe(7400);
+    expect(rpmOf(42, FPS)).toBe(5100);   // 表外 -> 40
+    expect(rpmOf(26, FPS)).toBe(3200);   // 表外 -> 25
+  });
+
+  test("运行时单源：app.js 从 /api/levels 取表，不自带第二份", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/api\/levels/);
+    expect(code).toMatch(/window\.FPS\s*=/);
+  });
+});
+
+describe("M5: renderCurve 的纯逻辑抽进 core.js 可测", () => {
+  const core = () => import("../../panel/core.js");
+
+  test("行：温度界 / 档位 / RPM / 噪音列齐全，未命中不高亮", async () => {
+    const c = await core();
+    const html = c.curveRowsHtml([{ upto: 56, level: 30, rpm: 3800, db: "15.0" }], null);
+    expect(html).toContain("≤56°C");
+    expect(html).toContain("<b>30%</b>");
+    expect(html).toContain("3800");
+    expect(html).toContain("15.0");
+    expect(html).not.toContain('class="hi"');
+    expect(html).not.toContain("◀ 现在");
+  });
+
+  test("当前档位 ±6 内高亮并标「现在」，其余不高亮", async () => {
+    const c = await core();
+    const html = c.curveRowsHtml(
+      [{ upto: 56, level: 30, rpm: 3800, db: "15.0" },
+       { upto: 62, level: 40, rpm: 5100, db: "20.0" }], 33);
+    expect(html.match(/class="hi"/g) || []).toHaveLength(1);
+    expect(html.match(/◀ 现在/g) || []).toHaveLength(1);
+    expect(html).toContain("<td><b>40%</b></td>");
+  });
+
+  test("应急段用 ≥，正常段用 ≤", async () => {
+    const c = await core();
+    expect(c.curveRowsHtml([{ upto: 80, level: 100, rpm: 12000, db: "50.0", emerg: true }], null))
+      .toContain("≥80°C");
+    expect(c.curveRowsHtml([{ upto: 56, level: 30, rpm: 3800, db: "15.0" }], null))
+      .toContain("≤56°C");
+  });
+
+  test("bands 缺失/为空 → 空串，不抛异常", async () => {
+    const c = await core();
+    expect(c.curveRowsHtml(undefined, 50)).toBe("");
+    expect(c.curveRowsHtml([], 50)).toBe("");
+    expect(c.curveRowsHtml(null, null)).toBe("");
+  });
+
+  test("params 缺字段 → 占位 '-'，不显示 undefined", async () => {
+    const c = await core();
+    const empty = c.curveParamsHtml({});
+    expect(empty).not.toContain("undefined");
+    expect(empty).toContain("采样 -s");
+    const full = c.curveParamsHtml({ IV: 10, HYST: 2, EMERG: 80, EMERG_REL: 75,
+                                     CAP: 70, TRIM: 5, GAIN: 2, DWELL: 10, DEAD: 2 });
+    expect(full).toContain("采样 10s");
+    expect(full).toContain("应急 <b>80°C</b>");
+  });
+
+  test("app.js 的 renderCurve 改用这两个纯函数", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/curveRowsHtml\(/);
+    expect(code).toMatch(/curveParamsHtml\(/);
+  });
+});

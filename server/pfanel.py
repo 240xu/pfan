@@ -584,14 +584,20 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self._deny("bad request: %s" % e, 400)
             return
-        # ② 写操作放行规则：Token 匹配，或 Origin 属于本机（同源页面）
-        #    - Token：新页面从 HTML 注入，跨站读不到（同源策略）
-        #    - Origin 宽限：浏览器旧缓存的页面没 Token，但仍带本源 Origin，
-        #      放行以免刷新前把面板弄坏；curl 不带 Origin → 被拒（符合预期）
+        # ② 写操作放行规则：【token 必须匹配】，带了 Origin 时还必须在白名单里。
+        #
+        # 曾经这里是 "token 或 Origin"（OR）—— 但 origin_allowed() 只比对主机名、
+        # 忽略端口与协议，于是 localhost:9999 / 192.168.1.10:8080 / pfan.example.com:<任意>
+        # 这些同主机不同端口的页面全都能【免 token】写档位。SECURITY.md 承诺的是"必须带
+        # token"，文档与代码不一致，而且这是本仓库的安全头条。
+        # 面板始终注入 token（app.js:5），"旧缓存页面没 token"的过渡理由早已失效。
         tok = self.headers.get("X-Pfan-Token", "")
         origin = self.headers.get("Origin", "") or ""
-        if tok != get_token() and not self._same_origin(origin):
+        if tok != get_token():
             self._deny("missing or invalid X-Pfan-Token")
+            return
+        if origin and not origin_allowed(origin):
+            self._deny("origin not allowed")
             return
         try:
             d = json.loads(body or "{}")

@@ -16,3 +16,19 @@ su root syslog
 	copytruncate
 	sharedscripts
 }
+
+# pfanel.log 由 guard() / set_curve 兜底分支写入（罕见，涨得慢，但没人轮转就永远涨）。
+# 与 pfand 同因同治：pfanel 也是 `>>` 追加、没有信号处理 → 必须 copytruncate。
+# su 用顶部的全局 `su root syslog`（logrotate 全局指令覆盖本文件所有段，
+# 本仓库 deploy.sh 有 logrotate -d 自检）。
+/var/log/pfanel.log {
+	daily
+	rotate 7
+	maxsize 10M
+	compress
+	delaycompress
+	missingok
+	notifempty
+	copytruncate
+	sharedscripts
+}

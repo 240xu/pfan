@@ -17,5 +17,10 @@ PFAN_DEV=<普通文件>              默认 /dev/pfanctl（生产要求字符设
 PFAN_LOCK/LOG/PLATFORM_CONF/PORT 同理
 ```
 
-**为什么必须逐点对齐真驱动**：测试绿而真机错是最危险的失败形态。三点对齐已核对：
-行格式、时间戳单调、坏路径不产生 RESULT（fail-closed，见 `pfanctl.c` 的 `get_handle` 失败分支）。
+**为什么必须逐点对齐真驱动**：测试绿而真机错是最危险的失败形态。对齐核对（I1 后收紧）：
+行格式、时间戳单调、以及 **fail-closed** —— 只有已知好路径上的合法请求才产生 RESULT：
+`FAN_DEVICE` 上的 `_FSL 1 <n>`（记档）/ `_FST`（读档），与 `EC_ROOT` 上的 `EC88 <args>`
+（pfanel 读 ec76 依赖）；坏路径 / 坏格式 / 设备文件缺失或读不出时一条 RESULT 都不产生
+（对应 `pfanctl.c` 的 `get_handle` 失败分支只 `pr_err` 不打 RESULT）。
+没有这条，写失败的死设备照样吐出"新鲜"RESULT，`getL` 会把陈旧档位当成实际值，
+E2E 层就永远抓不到 fail-open（见 `tests/shell/test_pfand_loop.sh` 的前提 3 与 T12）。
