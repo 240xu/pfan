@@ -142,15 +142,28 @@ elif grep -qE "$SECRET_RE" panel/app.js panel/index.html; then
 else
   ok "仓库面板只含 __PFAN_TOKEN__ 占位符"
 fi
-if remote "grep -q '__PFAN_TOKEN__' /opt/beszel/beszel_data/app.js"; then
-  if remote "grep -qE '$SECRET_RE' /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/index.html"; then
-    bad "部署件疑似含真实密钥/UUID"
-  else
-    ok "部署件 app.js 只含 __PFAN_TOKEN__ 占位符"
-  fi
-else
-  bad "部署件 app.js 缺 __PFAN_TOKEN__ 占位符（线上注入不到 Token？）"
-fi
+# 部署件目录对 pfan 不可读（2026-10-07 实测 grep 直读报 Permission denied），
+# 与上面 sha256sum 一样必须带 sudo 兜底；否则会把【读不到】误报成【占位符不存在】——
+# 一条指向完全相反的失败信息，会把人引去查服务端注入逻辑而不是权限。
+dep_grep(){   # dep_grep <regex> <files...>  → 0=匹配 1=没匹配 2=两次都读不到
+  local re="$1"; shift
+  if remote "sudo -n grep -qE '$re' $*" 2>/dev/null; then return 0; fi
+  if remote "grep -qE '$re' $*" 2>/dev/null; then return 0; fi
+  remote "sudo -n test -r $(echo "$*" | cut -d' ' -f1)" 2>/dev/null && return 1
+  return 2
+}
+dep_grep '__PFAN_TOKEN__' /opt/beszel/beszel_data/app.js
+case $? in
+  0)
+    dep_grep "$SECRET_RE" /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/index.html
+    case $? in
+      0) bad "部署件疑似含真实密钥/UUID" ;;
+      1) ok "部署件 app.js 只含 __PFAN_TOKEN__ 占位符" ;;
+      *) bad "部署件密钥扫描读不到（权限？sudo 不可用？）" ;;
+    esac ;;
+  1) bad "部署件 app.js 缺 __PFAN_TOKEN__ 占位符（线上注入不到 Token？）" ;;
+  *) bad "部署件 app.js 读不到（权限？sudo 不可用？）—— 不是占位符缺失，别去查注入逻辑" ;;
+esac
 
 printf '\n=== 6. 平台配置（事故根因那份文件，必须存在且完整）===\n'
 PC=$(remote 'sudo -n cat /etc/pfan/platform.conf 2>/dev/null' || true)
