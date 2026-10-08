@@ -42,20 +42,40 @@ def test_state_seam_defaults_equal_production():
     注意：本文件已经把这些环境变量指向临时目录了，所以不能断言解析后的值，
     只能断言源码里写的缺省值（与 pfand 侧 T0 的做法一致）。
     """
+    # 用 AST【真实解析】源码缺省值，而不是 `default in src` 的字符串包含 ——
+    # 2026-10-08 实例：自动格式化把 os.environ.get("PFAN_LOCK", "/run/pfanel.lock")
+    # 折成两行，字符串包含当场静默失效，而这条正是防"三个程序锁分叉"的守卫。
+    # 格式化器悄悄废掉安全守卫，比没有守卫更危险。解析 AST 后折行/改引号都影响不到它。
+    import ast as _ast
     import inspect
-    src = inspect.getsource(pfanel)
-    for default in ('os.environ.get("PFAN_DB", "/var/lib/pfanel/pfanel.db")',
-                    'os.environ.get("PFAN_CURVE_FILE", "/var/lib/pfanel/curve.state")',
-                    'os.environ.get("PFAN_TOKEN_FILE", "/var/lib/pfanel/token")',
-                    'os.environ.get("PFAN_CONF", "/etc/pfand.conf")',
-                    'os.environ.get("PFAN_LOCK", "/run/pfanel.lock")'):
-        assert default in src, f"缺省值不是生产值: {default}"
+    tree = _ast.parse(inspect.getsource(pfanel))
+    found = {}
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
+                and node.func.attr == "get" and len(node.args) >= 2):
+            a0, a1 = node.args[0], node.args[1]
+            if (isinstance(a0, _ast.Constant) and isinstance(a1, _ast.Constant)
+                    and isinstance(a0.value, str) and a0.value.startswith("PFAN_")):
+                found.setdefault(a0.value, a1.value)
+    expected = {
+        "PFAN_DB": "/var/lib/pfanel/pfanel.db",
+        "PFAN_CURVE_FILE": "/var/lib/pfanel/curve.state",
+        "PFAN_TOKEN_FILE": "/var/lib/pfanel/token",
+        "PFAN_CONF": "/etc/pfand.conf",
+        "PFAN_LOCK": "/run/pfanel.lock",
+        "PFAN_DMESG": "dmesg",
+        "PFAN_PANEL_DIR": "/opt/beszel/beszel_data",
+    }
+    for k, want in expected.items():
+        assert k in found, f"源码里找不到 {k} 的缺省值（接缝被删了？）"
+        assert found[k] == want, f"{k} 缺省值不是生产值: {found[k]!r}，期望 {want!r}"
     # PFAN_DEV 是三层回退（环境变量 -> 平台配置 -> 字面兜底），
     # 兜底值来自平台配置，所以断言平台配置里写的 DEV 才是真正的"生产值"。
-    assert 'os.environ.get("PFAN_DEV", "")' in src, "PFAN_DEV 接缝缺失"
+    assert 'os.environ.get("PFAN_DEV", "")' in inspect.getsource(pfanel), "PFAN_DEV 接缝缺失"
     with open(os.path.join(_REPO, "platform", "platform.conf.example"), encoding="utf-8") as fh:
         assert any(line.strip() == "DEV=/dev/pfanctl" for line in fh), \
             "平台配置里的 DEV 不是 /dev/pfanctl（生产值变了？）"
+
 
 
 def _serve(port=0):

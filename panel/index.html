@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Panasonic 风扇控制台</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-<!-- time 轴必需：Chart.js 4 的日期适配器，缺了会抛 "This method is not implemented: Check that a complete date adapter is provided" -->
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<!-- 图表库 vendored 在本机（/pfan-vendor-uplot.js），不再走 CDN：
+     目标机是 LAN 设备可能无出口，外链失败时图表会静默缺席而页面其余部分照常工作。
+     uPlot 用 xScale:{time:true} 直接吃 unix 秒，也不需要 Chart.js 的日期适配器。 -->
+<link rel="stylesheet" href="/pfan-vendor-uplot.css">
 <link rel="stylesheet" href="/pfan.css">
 </head>
 <body>
@@ -21,10 +22,14 @@
 </div>
 
 <div class="cards">
-  <div class="card"><div class="k">CPU 温度</div><div class="v" id="c-temp">--<span class="u">°C</span></div>
-    <div class="bar"><i id="c-temp-bar" style="width:0"></i></div></div>
-  <div class="card"><div class="k">当前设定档位</div><div class="v" id="c-lvl">--<span class="u">%</span></div>
-    <div class="bar"><i id="c-lvl-bar" style="width:0;background:#3fb950"></i></div></div>
+  <div class="card"><div class="k">CPU 温度</div>
+    <div class="gauge"><div class="g-arc" id="c-temp-arc"></div></div>
+    <div class="v g-val" id="c-temp">--<span class="u">°C</span></div>
+    <div class="hint g-note" id="c-temp-note">—</div></div>
+  <div class="card"><div class="k">当前设定档位</div>
+    <div class="gauge"><div class="g-arc" id="c-lvl-arc"></div></div>
+    <div class="v g-val" id="c-lvl">--<span class="u">%</span></div>
+    <div class="hint g-note" id="c-lvl-note">—</div></div>
   <div class="card"><div class="k">EC 实际状态</div><div class="v" id="c-ec">--<span class="u">%</span></div>
     <div class="hint" id="c-ec-note">—</div></div>
   <div class="card"><div class="k">估算转速</div><div class="v" id="c-rpm">--<span class="u">rpm</span></div>
@@ -43,7 +48,7 @@
         实测轨迹（每点 = 一次采样，横轴温度、纵轴档位；点云自己描出阶梯形状 = 曲线在真实工作）
         <br><label style="cursor:pointer"><input type="checkbox" id="conly" checked>
         只看<b>曲线实际管控中</b>的样本（排除切换曲线的 0 档、手动测试值）</label></div>
-      <div class="chartbox" style="height:250px"><canvas id="ch3"></canvas></div>
+      <div class="chartbox" style="height:250px"><div id="ch3"></div></div>
     </div>
   </div>
 </div>
@@ -93,8 +98,8 @@
 </div>
 
 <div class="rows">
-  <div class="panel"><h2>温度 &amp; 档位（12h）</h2><div class="chartbox"><canvas id="ch1"></canvas></div></div>
-  <div class="panel"><h2>EC 实时风扇状态（0x76）</h2><div class="chartbox"><canvas id="ch2"></canvas></div></div>
+  <div class="panel"><h2>温度 &amp; 档位（12h）</h2><div class="chartbox"><div id="ch1"></div></div></div>
+  <div class="panel"><h2>EC 实时风扇状态（0x76）</h2><div class="chartbox"><div id="ch2"></div></div></div>
 </div>
 
 <div class="rows">

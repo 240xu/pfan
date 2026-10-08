@@ -33,17 +33,44 @@ pin(){ # pin <file> <literal> <说明>
   fi
 }
 
+# 用 python【真实解析】缺省值，而不是 grep 单行字面量 ——
+# 2026-10-08 实例：自动格式化把 os.environ.get("PFAN_LOCK", "/run/pfanel.lock") 折成
+# 两行，grep 型钉子当场失效，而这条正是防"三个程序锁分叉"的守卫 —— 格式化器悄悄
+# 废掉安全守卫，比没有守卫更危险。解析 AST 后，折行/改引号都影响不到它。
+py_default(){ # py_default <env名> <期望缺省> <说明>
+  local name="$1" want="$2" why="$3" got
+  got=$(python3 - "$name" <<'PYEOF'
+import ast, sys
+name = sys.argv[1]
+src = open("server/pfanel.py", encoding="utf-8").read()
+for node in ast.walk(ast.parse(src)):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+       and node.func.attr == "get" and node.args:
+        a0 = node.args[0]
+        if isinstance(a0, ast.Constant) and a0.value == name and len(node.args) > 1:
+            a1 = node.args[1]
+            if isinstance(a1, ast.Constant):
+                print(a1.value); break
+PYEOF
+  )
+  if [ "$got" = "$want" ]; then
+    ok "server/pfanel.py 的 $name 缺省 = $got  ($why)"
+  else
+    ng "server/pfanel.py 的 $name 缺省 = '${got:-<解析不到>}'，期望 '$want'  ($why)"
+  fi
+}
+
 echo "== T1: PFAN_LOCK 三处必须同为 /run/pfanel.lock（单槽设备共锁）=="
 pin core/pfand  'PFAN_LOCK:-/run/pfanel.lock' 'pfand'
 pin core/pfan   'PFAN_LOCK:-/run/pfanel.lock' 'pfan'
-pin server/pfanel.py 'os.environ.get("PFAN_LOCK", "/run/pfanel.lock")' 'pfanel'
+py_default PFAN_LOCK /run/pfanel.lock pfanel
+py_default PFAN_DMESG dmesg pfanel
 
 echo "== T2: PFAN_DMESG 三处必须同为 dmesg（消费者都靠它找 RESULT 行）=="
 # core/pfan 是本次提交新增的第三个消费者：`PFAN_DMESG:-dmesgX` 会让 `pfan get`
 # 静默执行 `sudo -n dmesgX`、一条 RESULT 都读不到，而 T2 旧版只钉 pfand/pfanel。
 pin core/pfand  'PFAN_DMESG:-dmesg' 'pfand'
 pin core/pfan   'PFAN_DMESG:-dmesg' 'pfan'
-pin server/pfanel.py 'os.environ.get("PFAN_DMESG", "dmesg")' 'pfanel'
 
 echo "== T3: 状态与配置文件路径 =="
 pin core/pfand  'PFAN_CONF:-/etc/pfand.conf' '权威曲线'

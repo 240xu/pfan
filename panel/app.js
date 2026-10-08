@@ -1,6 +1,11 @@
-import { checkTempOrder, curveParamsHtml, curveRowsHtml, dbOf, esc,
-         fetchJson, fmtTemp, isStale, rpmOf, statusText,
-         DEFAULT_STALE_AGE, staleAgeLimit } from "/pfan-core.js";
+// uPlot 由本机 vendored 路由提供（服务端 /pfan-vendor-uplot.js 从 panel/vendor 直读）。
+// 静态 route import 而非 CDN <script>：面板要在无出口的 LAN 设备上跑，
+// 且 ESM 的 default 导出即 uPlot 构造器（vendored 文件末尾 export { uPlot as default }）。
+import uPlot from "/pfan-vendor-uplot.js";
+import { checkTempOrder, classColor, curveParamsHtml, curveRowsHtml, dbOf, decimateCols,
+         esc, fetchJson, fmtTemp, gaugeMarkup, historyColumns, idealStep, isStale,
+         levelClass, rpmOf, scatterPoints, statusText, tempClass, valueText,
+         xSortedFlag, DEFAULT_STALE_AGE, staleAgeLimit } from "/pfan-core.js";
 
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
@@ -46,13 +51,25 @@ async function pollNow(){
   }catch(e){ setConn(e&&e.message||String(e)); }
 }
 
+/* ---------------- SVG 弧形表盘 ----------------
+ * 几何/配色/文案全在 core.js（纯函数、有单测）；这里只做 DOM 写入。
+ * 数值与颜色是两个独立通道：色盲/单色屏也必须能读出具体数字（温度右上角那行 <div class=v>）。 */
+function paintGauge(arcId, valId, v, min, max, unit, cls) {
+  const clsFn = typeof cls === "function" ? cls : (cls === "temp" ? tempClass : levelClass);
+  const c = clsFn(v);
+  const box = document.getElementById(arcId);
+  if (box) box.innerHTML = gaugeMarkup({ value: v, min, max, cls: c, unit, label: unit });
+  const el = document.getElementById(valId);
+  if (!el) return;
+  el.innerHTML = valueText(v) + '<span class="u">' + unit + '</span>';
+  // 数字本身也上色（冗余通道），但 "--" 用中性灰，不用 semantically wrong 的红
+  el.style.color = classColor(c);
+}
+
 function paint(d){
   cur=d.level; curLevel=d.level;
-  document.getElementById("c-temp").innerHTML=fmtTemp(d.temp)+'<span class="u">°C</span>';
-  document.getElementById("c-temp-bar").style.width=Math.min(100,(d.temp||0)/1.0)+"%";
-  document.getElementById("c-temp-bar").style.background=d.temp>78?"#f85149":d.temp>65?"#d29922":"#1f6feb";
-  document.getElementById("c-lvl").innerHTML=(d.level==null?"--":d.level)+'<span class="u">%</span>';
-  document.getElementById("c-lvl-bar").style.width=Math.min(100,Number(d.level)||0)+"%";
+  paintGauge("c-temp-arc","c-temp",d.temp,0,105,"°C","classTemp");
+  paintGauge("c-lvl-arc","c-lvl",d.level,0,120,"%","level");
   document.getElementById("c-ec").innerHTML=(d.ec76==null?"--":d.ec76)+'<span class="u">%</span>';
   document.getElementById("c-rpm").innerHTML=(d.rpm==null?"--":d.rpm)+'<span class="u">rpm</span>';
   const ecd=document.getElementById("c-ec");
@@ -173,45 +190,76 @@ async function setAuto(){
   }catch(e){ setConn("交还守护失败: "+why(e)); }
 }
 
-function initCharts(h){
-  // 用真正的 time 轴 + {x,y} 数据点。
-  // 旧写法把 2000 个 Date 当 category labels，刻度会显示成
-  // "2026-10-05T08:03:15.000Z" 这种完整 ISO 串，非常难看。
-  const T=(x)=>x*1000;
-  const tt={unit:'auto',displayFormats:{hour:'HH:mm',day:'MM-DD HH:mm',
-    minute:'HH:mm',second:'HH:mm:ss'}};
-  const ax={type:'time',time:tt,ticks:{color:'#8b949e',maxRotation:0,
-    autoSkip:true,maxTicksLimit:8,autoSkipPadding:12},
-    grid:{color:'#21262d'}};
-  ch1=new Chart(document.getElementById('ch1'),{type:'line',
-   data:{datasets:[
-     {label:'温度 °C',data:h.filter(x=>x.temp!=null).map(x=>({x:T(x.ts),y:x.temp})),
-      borderColor:'#f0883e',backgroundColor:'rgba(240,136,62,.12)',fill:true,
-      tension:.3,pointRadius:0,yAxisID:'y'},
-     {label:'档位 %',data:h.filter(x=>x.level!=null).map(x=>({x:T(x.ts),y:x.level})),
-      borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,.10)',fill:true,
-      tension:.3,pointRadius:0,yAxisID:'y1'}]},
-   options:{responsive:true,maintainAspectRatio:false,
-    parsing:false,normalized:true,
-    interaction:{mode:'index',intersect:false},
-    plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}},
-      tooltip:{callbacks:{title:it=>new Date(it[0].parsed.x)
-        .toLocaleString('zh-CN',{hour12:false})}}},
-    scales:{x:ax,
-      y:{position:'left',ticks:{color:'#8b949e'},grid:{color:'#21262d'},
-         title:{display:true,text:'°C',color:'#8b949e'}},
-      y1:{position:'right',min:0,max:120,ticks:{color:'#8b949e'},
-         grid:{drawOnChartArea:false},title:{display:true,text:'%',color:'#8b949e'}}}}});
-  ch2=new Chart(document.getElementById('ch2'),{type:'line',
-   data:{datasets:[{label:'EC 0x76 实际状态 %',
-     data:h.filter(x=>x.ec76!=null).map(x=>({x:T(x.ts),y:x.ec76})),
-     borderColor:'#58a6ff',backgroundColor:'rgba(88,166,255,.14)',fill:true,
-     tension:.3,pointRadius:0}]},
-   options:{responsive:true,maintainAspectRatio:false,parsing:false,normalized:true,
-    plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}},
-      tooltip:{callbacks:{title:it=>new Date(it[0].parsed.x)
-        .toLocaleString('zh-CN',{hour12:false})}}},
-    scales:{x:ax,y:{min:0,max:110,ticks:{color:'#8b949e'},grid:{color:'#21262d'}}}}});
+/* ---------------- 图表（uPlot） ----------------
+ * uPlot 构造器签名是 new uPlot(opts, data, target)，data 是【列式】
+ * [x[], y1[], y2[]] —— 由 core.historyColumns 出。xScale:{time:true} +
+ * 默认 ms=1e-3 ⇒ x 取 unix【秒】（Chart.js 时代的 *1000 必须留在历史服务业 trace 里）。 */
+// uPlot 不带主题，颜色全部显式给；容器继承 body 的 #0d1117，不用再铺底。
+const TICK = "#8b949e", GRID = "#21262d";
+const TIME_AXIS = { stroke: TICK, grid: { stroke: GRID, width: 1 },
+                    ticks: { stroke: GRID } };
+const Y_AXIS = { stroke: TICK, grid: { stroke: GRID, width: 1 },
+                 ticks: { stroke: GRID } };
+const LEGEND = { show: true, stroke: TICK, live: true };
+// 轴标题/刻度 ⇒ uPlot 默认继承 body 的字体，这里统一 panel 的 #8b949e 灰
+const T_STAMP = "YYYY-MM-DD HH:mm:ss";
+
+/* uPlot【不会】自己跟着容器跑 —— 它只在构造时按 opts.width/height 算一次
+ * （源码里没有 ResizeObserver；见 vendored 文件 _setSize(opts.width, opts.height)）。
+ * 而 .uplot 的默认 CSS 是 width:min-content ⇒ 不给宽高等尺寸的话图会塌成一条线。
+ * 旧版 Chart.js 用 responsive:true 自动处理这件事，这里必须手动补。
+ * 做法：构造前把宿主盒子的实测尺寸喂进去，并挂 ResizeObserver 持续同步
+ * （ResizeObserver 触发时会回调一次初始尺寸，不会重复损失首帧）。 */
+function sizeOf(el) {
+  const b = el.getBoundingClientRect();
+  return { width: Math.max(0, b.width), height: Math.max(0, b.height || 220) };
+}
+function fitChart(el, u) {
+  if (!el || !u) return;
+  const s = sizeOf(el);
+  if (s.width > 0 && s.height > 0) u.setSize(s);
+  // 面板后台标签/窗口缩放都要跟随；ResizeObserver 不可用时（老浏览器）退回
+  // 一次性 fitting —— 图不会跟着变但不至于塌掉
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => {
+      const t = sizeOf(el);
+      if (t.width > 0 && t.height > 0) u.setSize(t);
+    }).observe(el);
+  }
+}
+function mount(elId, opts, data) {
+  const el = document.getElementById(elId);
+  if (!el) return null;
+  return new uPlot(Object.assign({}, sizeOf(el), opts), data, el);
+}
+
+function initCharts(h) {
+  const cols = historyColumns(h);
+  // 第 4 列是 EC 另一端：ch2 独立使用以免与 temp/level 的 y 值域互相拉扯
+  ch1 = mount("ch1", {
+    scales: { x: { time: true }, y: {}, pct: { range: [0, 120] } },
+    legend: LEGEND,
+    series: [
+      {},
+      { label: "温度 °C", stroke: "#f0883e", fill: "rgba(240,136,62,.12)", width: 1.5 },
+      { label: "档位 %", stroke: "#3fb950", fill: "rgba(63,185,80,.10)",
+        width: 1.5, scale: "pct" },
+    ],
+    axes: [TIME_AXIS, Y_AXIS],
+  }, [cols[0], cols[1], cols[2]]);
+  fitChart(document.getElementById("ch1"), ch1);
+
+  ch2 = mount("ch2", {
+    scales: { x: { time: true }, y: { range: [0, 110] } },
+    legend: LEGEND,
+    series: [
+      {},
+      { label: "EC 0x76 实际状态 %", stroke: "#58a6ff",
+        fill: "rgba(88,166,255,.14)", width: 1.5 },
+    ],
+    axes: [TIME_AXIS, Y_AXIS],
+  }, [cols[0], cols[3]]);
+  fitChart(document.getElementById("ch2"), ch2);
 }
 
 async function refreshHist(){
@@ -221,11 +269,12 @@ async function refreshHist(){
     const T=x=>x*1000;
     if(!ch1){ initCharts(h); }
     else{
-      ch1.data.datasets[0].data=h.filter(x=>x.temp!=null).map(x=>({x:T(x.ts),y:x.temp}));
-      ch1.data.datasets[1].data=h.filter(x=>x.level!=null).map(x=>({x:T(x.ts),y:x.level}));
-      ch1.update('none');
-      ch2.data.datasets[0].data=h.filter(x=>x.ec76!=null).map(x=>({x:T(x.ts),y:x.ec76}));
-      ch2.update('none');
+      // uPlot 的 setData(data, true)：第二参 true = 重算值域。
+      // 等价旧版chart.update('none')的无动画刷新 ——800 点降采样已在 core 层完成，
+      // 这里只是把新的三个列灌回去。
+      const c=historyColumns(h);
+      ch1.setData([c[0],c[1],c[2]], true);
+      ch2.setData([c[0],c[3]], true);
     }
     const tb=document.querySelector("#hist tbody");
     tb.innerHTML=h.slice(-14).reverse().map(x=>`<tr>
@@ -282,47 +331,34 @@ async function drawScatter(){
   try{
     const only=document.getElementById('conly')?.checked;
     const h=await j(API+"/api/history?hours=24"+(only?"&curve=1":""));
-    // 无条件剔除非法档位：0=释放控制、>100=越界
-    let pts=h.filter(x=>x.temp!=null&&x.level!=null&&x.level>0&&x.level<=100)
-                .map(x=>({x:x.temp,y:x.level}));
-    // 降采样：点太多浏览器会卡（每点一个 canvas 绘制指令）
-    const CAP=800;
-    if(pts.length>CAP){
-      const step=pts.length/CAP, out=[];
-      for(let i=0;i<CAP;i++) out.push(pts[Math.floor(i*step)]);
-      pts=out;
-    }
+    // 剔除非法档位（0=释放控制、>100=越界）+ 800 点降采样：都在 core.scatterPoints 里。
+    // 降采样保留就在这里之前做：24h 全量可达数千点，每个点一条 canvas 指令会卡浏览器。
+    const pts=scatterPoints(h);
     const cv=await j(API+"/api/curve");
-    // 理想阶梯曲线：每段从上一段档位水平延伸到本段上界
-    const bands=(cv.bands||[]).filter(b=>b.level>0);
-    const ideal=[];
-    let prev=null;
-    bands.forEach(b=>{
-      if(prev!==null&&prev!==b.level) ideal.push({x:b.upto,y:prev});
-      ideal.push({x:b.upto,y:b.level});
-      prev=b.level;
-    });
-    if(prev!==null) ideal.push({x:105,y:prev});
-    ideal.sort((a,b)=>a.x-b.x);
-    if(ch3){ch3.data.datasets[0].data=pts;ch3.data.datasets[1].data=ideal;ch3.update('none');return;}
-    ch3=new Chart(document.getElementById('ch3'),{type:'scatter',
-      data:{datasets:[
-        {label:'实测采样',data:pts,backgroundColor:'rgba(88,166,255,.45)',
-         pointRadius:1.5,borderWidth:0},
-        {label:'设定曲线（阶梯）',data:ideal,type:'line',borderColor:'#3fb550',
-         backgroundColor:'transparent',borderWidth:2,borderDash:[5,4],
-         pointRadius:0,showLine:true}]},
-      // 结构：plugins 与 scales 是 options 的【兄弟】。旧版把 scales 写进了 plugins，
-      // Chart.js 会忽略 options.plugins.scales —— 轴标题/35..105 的范围全部不生效。
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}},
-          tooltip:{callbacks:{label:c=>c.datasetIndex===1
-            ?`曲线 ≤${c.parsed.x}°C → ${c.parsed.y}%`
-            :`实测 ${c.parsed.x}°C → ${c.parsed.y}%`}}},
-        scales:{x:{title:{display:true,text:'CPU 温度 °C',color:'#8b949e'},
-            ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:35,max:105},
-          y:{title:{display:true,text:'风扇档位 %',color:'#8b949e'},
-            ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:0,max:105}}}});
+    // 理想阶梯曲线：每段从上一段档位水平延伸到本段上界（几何在 core.idealStep）
+    const st=idealStep((cv.bands||[]).filter(b=>b.level>0));
+    if(ch3){ ch3.setData([pts.x,pts.y,st.x,st.y], true); return; }
+    // 实测点的温度列【不是】单调的 → xScale.sorted=0（默认 1 会让 uPlot 按升序二分找 x，
+    // 把点画到错误位置）。两列共享同一个 scale key，所以一个 xScale 就够。
+    ch3=mount("ch3",{
+      scales:{ x:{ range:[35,105], sorted:xSortedFlag(pts.x) },
+               y:{ range:[0,105] } },
+      legend:LEGEND,
+      series:[
+        {},
+        // 点云用 points 而不是连线：这是"实测轨迹"，不是时间序列
+        { label:"实测采样", stroke:"rgba(88,166,255,.45)", fill:"rgba(88,166,255,.45)",
+          width:0, points:{ show:true, size:3, stroke:"rgba(88,166,255,.45)",
+          fill:"rgba(88,166,255,.45)" } },
+        { label:"设定曲线（阶梯）", stroke:"#3fb950", width:2, points:{show:false},
+          dash:[5,4] },
+      ],
+      axes:[
+        Object.assign({}, Y_AXIS, {label:"CPU 温度 °C", labelStroke:TICK}),
+        Object.assign({}, Y_AXIS, {label:"风扇档位 %", labelStroke:TICK}),
+      ],
+    }, [pts.x,pts.y,st.x,st.y]);
+    fitChart(document.getElementById("ch3"), ch3);
   }catch(e){ setConn("刷新散点图失败: "+why(e)); }
 }
 

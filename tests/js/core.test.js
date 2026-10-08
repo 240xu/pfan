@@ -437,9 +437,10 @@ describe("U1: API 字符串进 innerHTML 必须经 esc()（导出了却没接线
   });
 });
 
-describe("U2: drawScatter 的 Chart 配置（scales 必须在 options 顶层）", () => {
-  // 把 new Chart(...) 的配置对象字面量抠出来 eval，按【真实结构】断言 ——
-  // 纯正则只能看到 "scales 存在于源码里"，看不出它嵌在哪一层。
+describe("U2: drawScatter 的图表配置（scales 必须在 opts 顶层）", () => {
+  // 结构与结构的桥: Chart.js 时代踩过的坑是"scales 嵌进了 plugins 被整包忽略"。
+  // 换成 uPlot 后同一个坑仍在 —— 把 new uPlot(...) 的第一个实参求值，按【真实嵌套】断言。
+  // 求值即 eval: guarded by the fact that both arguments are source literals here.
   function chartConfig(src, anchor) {
     const i = src.indexOf(anchor);
     expect(i, `找不到 ${anchor}`).toBeGreaterThan(-1);
@@ -453,20 +454,37 @@ describe("U2: drawScatter 的 Chart 配置（scales 必须在 options 顶层）"
       }
     }
     expect(end, "配置对象没闭合").toBeGreaterThan(-1);
-    // data 段引用 drawScatter 的局部变量（pts/ideal）—— 给桩，只对结构求值；
-    // options 段是纯字面量（数字/字符串/箭头/模板串），eval 后拿到真实嵌套层级。
-    const pts = [], ideal = [];
+    // opts 段里嵌了几个 drawScatter 作用域内的表达式（xSortedFlag(pts.x) 等）——
+    // 给桩，只对【结构嵌套】求值（纯正则看不见 scales 到底嵌在第几层）。
+    const xSortedFlag = () => 0;
+    const LEGEND = {}, Y_AXIS = {}, TICK = "";
+    const pts = { x: [50], y: [25] };
     return eval("(" + src.slice(brace, end + 1) + ")");
   }
 
-  test("options.scales 在顶层且 min/max 生效；plugins 里没有 scales", async () => {
+  test("ch3: scales 在顶层且 x/y 值域生效；plugins 里没有 scales", async () => {
     const code = codeOnly(await appSrc());
-    const cfg = chartConfig(code, "ch3=new Chart(");
-    expect(cfg.options.scales, "options.scales 缺失 —— 轴配置没生效").toBeTruthy();
-    expect(cfg.options.scales.x.min).toBe(35);
-    expect(cfg.options.scales.x.max).toBe(105);
-    expect(cfg.options.scales.y.min).toBe(0);
-    expect(cfg.options.plugins.scales, "scales 嵌进了 plugins（Chart.js 会忽略它）").toBeUndefined();
+    const cfg = chartConfig(code, "ch3=mount(\"");
+    expect(cfg.scales, "opts.scales 缺失 —— 值域没生效").toBeTruthy();
+    expect(cfg.scales.x.range).toEqual([35, 105]);
+    expect(cfg.scales.y.range).toEqual([0, 105]);
+    expect(cfg.plugins && cfg.plugins.scales,
+      "scales 嵌进了 plugins（会被整包忽略）").toBeUndefined();
+  });
+
+  test("ch3: 实测点必须声明 sorted（温度列非单调 → 0）", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/sorted:\s*xSortedFlag\(/);
+    const cfg = chartConfig(code, "ch3=mount(\"");
+    expect(cfg.scales.x).toHaveProperty("sorted");
+  });
+
+  test("ch3: 实测是点云、设定曲线是虚线阶梯（视觉意图不因换库而丢）", async () => {
+    const code = codeOnly(await appSrc());
+    const cfg = chartConfig(code, "ch3=mount(\"");
+    expect(cfg.series[1].points.show, "实测应当是散点").toBe(true);
+    expect(cfg.series[2].points.show, "设定曲线不画点标记").toBe(false);
+    expect(cfg.series[2].dash, "设定曲线应为虚线").toEqual([5, 4]);
   });
 });
 
@@ -510,9 +528,20 @@ describe("U3: 模块作用域 / 未处理 Promise / 视图刷新（浏览器里�
       /curveRowsHtml\(/);
   });
 
-  test("paint 把两条进度条都钳在 ≤100%（API 允许 1..120，120% 宽度会溢出卡片）", async () => {
-    const body = fnBody(codeOnly(await appSrc()), "paint");
-    expect((body.match(/Math\.min\(100/g) || []).length).toBeGreaterThanOrEqual(2);
+  test("表盘值域把 API 的 1..120 映射进 [min,max]，不再靠 CSS width 百分比", async () => {
+    // 旧版是 `style.width = Math.min(100, level)+"%"` —— level=120 时溢出卡片。
+    // 改成 SVG 弧后钳制发生在 gaugeArc 内部（frac 已 clamp 到 [0,1]），
+    // 这里改为守【值域上限确实覆盖了 120】，并验证 gaugeArc 不产生越界 offset。
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/paintGauge\([\s\S]*?max/);
+    const c = await core();
+    for (const over of [121, 500, 9999]) {
+      const g = c.gaugeArc({ cx: 50, cy: 46, r: 36, sweep: 240, start: 150,
+                             value: over, min: 0, max: 120 });
+      expect(g.dashoffset, `level=${over} 不得溢出`).toBe(0);
+      expect(g.frac).toBeLessThanOrEqual(1);
+      expect(g.frac).toBeGreaterThanOrEqual(0);
+    }
   });
 
   test("saveParams 发送前本地拦 NaN 与温度乱序（复用 checkTempOrder）", async () => {
@@ -558,5 +587,350 @@ describe("U4: 文案 / 单位 / 可访问性", () => {
     const { readFileSync } = await import("node:fs");
     const css = readFileSync(new URL("../../panel/styles.css", import.meta.url), "utf8");
     expect(css).toMatch(/:focus-visible/);
+  });
+});
+
+// ================= V1: 本地化 uPlot（去 CDN + Chart.js） =================
+
+async function panelFile(rel) {
+  const { readFileSync } = await import("node:fs");
+  return readFileSync(new URL("../../" + rel, import.meta.url), "utf8");
+}
+
+describe("V1: index.html 不得再从 CDN 拉图表库（LAN 设备可能无出口）", () => {
+  test("没有 https:// CDN 引用 —— 无出口机器上会静默缺图", async () => {
+    const html = await panelFile("panel/index.html");
+    expect(html).not.toMatch(/https?:\/\/cdn\./);
+    expect(html).not.toMatch(/https?:\/\/unpkg\.com/);
+  });
+
+  test("没有 chart.umd / date-fns 适配器残留（含注释）", async () => {
+    const html = await panelFile("panel/index.html");
+    expect(html).not.toMatch(/chart\.umd/i);
+    expect(html).not.toMatch(/adapter-date-fns/i);
+    expect(html).not.toMatch(/cdn\.jsdelivr\.net/i);
+  });
+
+  test("引入本地 uPlot 样式路由", async () => {
+    const html = await panelFile("panel/index.html");
+    expect(html).toMatch(/href="\/pfan-vendor-uplot\.css"/);
+  });
+});
+
+describe("V1: 服务端必须给 vendored 资产提供本地路由", () => {
+  test("pfanel.py 有两个 vendor 路由 + 正确的 Content-Type", async () => {
+    const py = await panelFile("server/pfanel.py");
+    expect(py).toMatch(/"\/pfan-vendor-uplot\.js"/);
+    expect(py).toMatch(/"\/pfan-vendor-uplot\.css"/);
+    expect(py).toMatch(/text\/css/);
+    expect(py).toMatch(/application\/javascript/);
+  });
+
+  test("vendor 路由从 panel/vendor/ 读文件（去重写了 CDN 却漏了读路径）", async () => {
+    const py = await panelFile("server/pfanel.py");
+    expect(py).toMatch(/VENDOR_DIR|["']vendor["']/);
+    expect(py).toMatch(/uPlot\.esm\.js/);
+    expect(py).toMatch(/uPlot\.min\.css/);
+  });
+});
+
+describe("V1: app.js 从本地路由 import uPlot，不再 new Chart(", () => {
+  test("静态 route import：from \"/pfan-vendor-uplot.js\"", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/import\s+uPlot\s+from\s+["']\/pfan-vendor-uplot\.js["']/);
+    expect(code).toMatch(/new\s+uPlot\(/);
+  });
+
+  test("源码任何位置都没有 new Chart( 残留", async () => {
+    const src = await appSrc();
+    expect(src).not.toMatch(/new\s+Chart\s*\(/);
+    expect(src).not.toMatch(/chart\.umd/i);
+    expect(src).not.toMatch(/adapter-date-fns/i);
+  });
+
+  test("app.js 也不许再从 CDN 拉任何东西（把风险HTML 搬到 JS 一样致命）", async () => {
+    const src = await appSrc();
+    expect(src).not.toMatch(/https?:\/\/cdn\./);
+    expect(src).not.toMatch(/https?:\/\/unpkg\.com/);
+    expect(src).not.toMatch(/https?:\/\/esm\.sh/);
+  });
+
+  test("uPlot 是默认导出（vendored ESM 只 export default uPlot）", async () => {
+    const vend = await panelFile("panel/vendor/uPlot.esm.js");
+    expect(vend).toMatch(/export\s*\{\s*uPlot\s+as\s+default\s*\}/);
+  });
+});
+
+// ================= V2: uPlot 数据整形（不依赖 DOM） =================
+
+const core = () => import("../../panel/core.js");
+
+describe("V2: history → uPlot 列式数据（time 轴用 unix 秒）", () => {
+  test("抽出三列并对齐到同一份 x：null 保留，uPlot 会断开连线", async () => {
+    const c = await core();
+    const h = [{ ts: 100, temp: 50, level: 25, ec76: 30 },
+               { ts: 110, temp: 51, level: 25, ec76: null },
+               { ts: 120, temp: null, level: 30, ec76: 40 }];
+    const d = c.historyColumns(h);
+    expect(d[0]).toEqual([100, 110, 120]);   // 秒，不 *1000
+    expect(d[1]).toEqual([50, 51, null]);
+    expect(d[2]).toEqual([25, 25, 30]);
+    expect(d[3]).toEqual([30, null, 40]);
+  });
+
+  test("喂了 Date 对象会被翻译成秒级数字（*_1000 是 Chart.js 时代的包袱）", async () => {
+    const c = await core();
+    const d = c.historyColumns([{ ts: 1000, temp: 1, level: 1, ec76: 1 }]);
+    expect(typeof d[0][0]).toBe("number");
+    expect(d[0][0]).toBe(1000);
+  });
+
+  test("空/脏输入不抛，且长度自洽", async () => {
+    const c = await core();
+    for (const bad of [[], null, undefined]) {
+      const d = c.historyColumns(bad);
+      expect(Array.isArray(d)).toBe(true);
+      expect(d).toHaveLength(4);
+      expect(d[0]).toEqual([]);
+    }
+  });
+
+  test("缺 ts 的行整体丢弃（不能拿 undefined 当 x 轴刻度）", async () => {
+    const c = await core();
+    const d = c.historyColumns([{ ts: 1, temp: 1, level: 1, ec76: 1 },
+                                { temp: 2, level: 2, ec76: 2 },
+                                { ts: 3, temp: 3, level: 3, ec76: 3 }]);
+    expect(d[0]).toEqual([1, 3]);
+    expect(d[1]).toEqual([1, 3]);
+  });
+});
+
+describe("V2: 800 点降采样（每 goroutine-free 次拉全量历史的关键防线）", () => {
+  test("≤800 不动，>800 收敛到 800 且保持首尾", async () => {
+    const c = await core();
+    const src = Array.from({ length: 5000 }, (_, i) => i);
+    const out = c.decimate(src, 800);
+    expect(out).toHaveLength(800);
+    expect(out[0]).toBe(0);
+    expect(out[799]).toBe(4999);
+    const small = c.decimate([1, 2, 3], 800);
+    expect(small).toEqual([1, 2, 3]);
+  });
+
+  test("均匀性：相邻间隔不超过 2 步（不会把后一半数据全丢掉）", async () => {
+    const c = await core();
+    const out = c.decimate(Array.from({ length: 8000 }, (_, i) => i), 800);
+    const gaps = out.slice(1).map((v, i) => v - out[i]);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(20);   // 8000/800=10 → ≤20 留余量
+    expect(Math.min(...gaps)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("cap 非法/空输入安全", async () => {
+    const c = await core();
+    expect(c.decimate([], 800)).toEqual([]);
+    expect(c.decimate(null, 800)).toEqual([]);
+    expect(c.decimate([1, 2, 3], 0)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("V2: 散点图 uPlot 化（unsorted x 必须标 sorted:0）", () => {
+  test("抽出 {x:温度,y:档位} 并过滤非法档位（0=释放，>100=越界）", async () => {
+    const c = await core();
+    const pts = c.scatterPoints([
+      { temp: 50, level: 25 }, { temp: 51, level: 0 },
+      { temp: 52, level: 101 }, { temp: null, level: 30 },
+      { temp: 53, level: null }, { temp: 54, level: 100 },
+    ]);
+    expect(pts.x).toEqual([50, 54]);
+    expect(pts.y).toEqual([25, 100]);
+  });
+
+  test("sorted=-1/1/0：实测温度【不是】升序 → 必须 0，否则点会画错位置", async () => {
+    const c = await core();
+    expect(c.xSortedFlag([3, 1, 2])).toBe(0);
+    expect(c.xSortedFlag([1, 2, 3])).toBe(1);
+    expect(c.xSortedFlag([3, 2, 1])).toBe(-1);
+    expect(c.xSortedFlag([])).toBe(0);
+    expect(c.xSortedFlag([1])).toBe(1);      // 单点是升序也是降序 → 报升序，uPlot 无所谓
+  });
+
+  test("散点降采样后 x/y 仍然等长（错位 = 整幅图散架）", async () => {
+    const c = await core();
+    const big = Array.from({ length: 3000 }, (_, i) => ({ temp: 35 + (i % 70), level: 25 + (i % 70) }));
+    const pts = c.scatterPoints(big);
+    const d = c.decimateCols([pts.x, pts.y], 800);
+    expect(d[0]).toHaveLength(800);
+    expect(d[1]).toHaveLength(800);
+  });
+});
+
+describe("V2: 理想阶梯曲线（设定曲线的静态投影）", () => {
+  test("每段从上一段档位水平延伸到本段上界，最后延到 105°C", async () => {
+    const c = await core();
+    const s = c.idealStep([{ upto: 56, level: 30 }, { upto: 62, level: 40 },
+                           { upto: 80, level: 70 }]);
+    expect(s.x[0]).toBe(56);       expect(s.y[0]).toBe(30);
+    expect(s.x).toContain(62);     expect(s.y).toContain(40);
+    expect(Math.max(...s.x)).toBe(105);
+    expect(s.x[s.x.length - 1]).toBe(105);
+    // x 必须升序 —— uPlot line 画乱序点会来回折
+    expect(c.xSortedFlag(s.x)).toBe(1);
+  });
+
+  test("bands 空/含 0 档 → 退化成空系列而不抛", async () => {
+    const c = await core();
+    expect(c.idealStep([]).x).toEqual([]);
+    expect(c.idealStep(null).y).toEqual([]);
+    expect(c.idealStep([{ upto: 56, level: 0 }, { upto: 62, level: 25 }]).y).toContain(25);
+  });
+});
+
+// ================= V3: SVG 表盘几何（DOM-free 纯函数） =================
+
+describe("V3: gaugeArc 几何", () => {
+  const G = { cx: 50, cy: 50, r: 40, sweep: 240, start: 150 };
+
+  test("0% → 满 dashoffset（弧不可见）；100% → 0", async () => {
+    const c = await core();
+    const full = c.gaugeArc({ ...G, value: 0, min: 0, max: 100 });
+    expect(full.dashoffset).toBeCloseTo(full.circumference, 6);
+    const at100 = c.gaugeArc({ ...G, value: 100, min: 0, max: 100 });
+    expect(at100.dashoffset).toBeCloseTo(0, 6);
+  });
+
+  test("中点 = 半个 sweep", async () => {
+    const c = await core();
+    const m = c.gaugeArc({ ...G, value: 50, min: 0, max: 100 });
+    expect(m.dashoffset).toBeCloseTo(m.circumference * 0.5, 6);
+  });
+
+  test("周长只由 sweep 决定：整圆 vs 240°（几何与 value 无关）", async () => {
+    const c = await core();
+    const full = c.gaugePath({ cx: 0, cy: 0, r: 10, sweep: 360, start: 0 });
+    expect(full.circumference).toBeCloseTo(2 * Math.PI * 10, 6);
+    const arc = c.gaugePath({ cx: 0, cy: 0, r: 10, sweep: 240, start: 0 });
+    expect(arc.circumference).toBeCloseTo(2 * Math.PI * 10 * (240 / 360), 6);
+  });
+
+  test("路径从左端点到右端点（240° ≠ 半圆，得算坐标）", async () => {
+    const c = await core();
+    // 几何本身与 value 无关 → 单独由 gaugePath 暴露（gaugeArc 在 value 无效时会返回 null，
+    // 那时拿不到 path —— 两者职责必须分开，否则空态连底弧都画不出来）
+    const d = c.gaugePath({ cx: 50, cy: 50, r: 40, sweep: 240, start: 150 });
+    const nums = d.path.match(/-?\d+(\.\d+)?/g).map(Number);
+    // 起点：150° → (50+40cos150, 50-40sin150)
+    expect(nums[0]).toBeCloseTo(50 + 40 * Math.cos(150 * Math.PI / 180), 3);
+    expect(nums[1]).toBeCloseTo(50 - 40 * Math.sin(150 * Math.PI / 180), 3);
+    // 终点：150+240=390° → 等价于 30°
+    expect(nums[nums.length - 2]).toBeCloseTo(50 + 40 * Math.cos(390 * Math.PI / 180), 3);
+    expect(nums[nums.length - 1]).toBeCloseTo(50 - 40 * Math.sin(390 * Math.PI / 180), 3);
+    expect(d.largeArc).toBe(1);        // 240° > 180° → large-arc-flag=1
+    expect(d.sweepFlag).toBe(1);
+  });
+
+  test("半圈及以下 large-arc-flag=0（>180 的判定不能写死为 1）", async () => {
+    const c = await core();
+    expect(c.gaugePath({ cx: 0, cy: 0, r: 10, sweep: 180, start: 0 }).largeArc).toBe(0);
+    expect(c.gaugePath({ cx: 0, cy: 0, r: 10, sweep: 181, start: 0 }).largeArc).toBe(1);
+  });
+
+  test("gaugeArc 返回体带上同一份 path（调用方不必再算一遍）", async () => {
+    const c = await core();
+    const g = c.gaugeArc({ cx: 50, cy: 50, r: 40, sweep: 240, start: 150,
+                           value: 50, min: 0, max: 100 });
+    expect(g.path).toBe(c.gaugePath({ cx: 50, cy: 50, r: 40, sweep: 240, start: 150 }).path);
+  });
+
+  test("非满量程：min/max 决定比例（0..120 下 60% = 一半）", async () => {
+    const c = await core();
+    const g = c.gaugeArc({ ...G, value: 60, min: 0, max: 120 });
+    expect(g.dashoffset).toBeCloseTo(g.circumference * 0.5, 6);
+  });
+
+  test("越界钳制：超出 [min,max] 不会画出一个负 dashoffset", async () => {
+    const c = await core();
+    const over = c.gaugeArc({ ...G, value: 999, min: 0, max: 100 });
+    expect(over.dashoffset).toBe(0);
+    const under = c.gaugeArc({ ...G, value: -50, min: 0, max: 100 });
+    expect(under.dashoffset).toBeCloseTo(under.circumference, 6);
+  });
+
+  test("min===max（配置错）不产生 NaN/Infinity", async () => {
+    const c = await core();
+    const bad = c.gaugeArc({ ...G, value: 5, min: 10, max: 10 });
+    expect(Number.isFinite(bad.dashoffset)).toBe(true);
+    expect(Number.isFinite(bad.circumference)).toBe(true);
+  });
+
+  test("value 为 null/undefined/NaN → null（调用方据此画空态）", async () => {
+    const c = await core();
+    for (const v of [null, undefined, NaN, "abc"]) {
+      expect(c.gaugeArc({ ...G, value: v, min: 0, max: 100 })).toBeNull();
+    }
+  });
+});
+
+describe("V3: 阈值配色沿用 styles.css 的 .ok/.warn/.bad 语义", () => {
+  test("温度：≤65 ok / 66..78 warn / >78 bad（沿用旧进度条的严格 >65/>78）", async () => {
+    const c = await core();
+    expect(c.tempClass(50)).toBe("ok");
+    expect(c.tempClass(64)).toBe("ok");
+    expect(c.tempClass(65)).toBe("ok");     // 严格大于：65 还没进预警
+    expect(c.tempClass(66)).toBe("warn");
+    expect(c.tempClass(78)).toBe("warn");
+    expect(c.tempClass(79)).toBe("bad");
+    expect(c.tempClass(95)).toBe("bad");
+  });
+
+  test("null 不是 bad（读不到 ≠ 过热），要有独立空态", async () => {
+    const c = await core();
+    expect(c.tempClass(null)).toBe("na");
+    expect(c.tempClass(undefined)).toBe("na");
+  });
+
+  test("class → CSS 变量色号必须是 panel 现有调色板", async () => {
+    const c = await core();
+    expect(c.classColor("ok")).toBe("#3fb950");
+    expect(c.classColor("warn")).toBe("#d29922");
+    expect(c.classColor("bad")).toBe("#f85149");
+    expect(c.classColor("na")).toBe("#484f58");
+    expect(c.classColor("bogus")).toBe("#484f58");
+  });
+
+  test("档位表盘走档位阈值（>85 bad / >70 warn / 其余 ok）", async () => {
+    const c = await core();
+    expect(c.levelClass(50)).toBe("ok");
+    expect(c.levelClass(70)).toBe("ok");
+    expect(c.levelClass(75)).toBe("warn");
+    expect(c.levelClass(90)).toBe("bad");
+    expect(c.levelClass(null)).toBe("na");
+  });
+
+  test("数值不能被颜色独担：valueText 永远返回可显示字符串", async () => {
+    const c = await core();
+    expect(c.valueText(null)).toBe("--");
+    expect(c.valueText(undefined)).toBe("--");
+    expect(c.valueText(0)).toBe("0");     // 0 是合法读数
+    expect(c.valueText(68)).toBe("68");
+    expect(c.valueText(68.4)).toBe("68");
+  });
+});
+
+describe("V3: 表盘必须真的接进 app.js（不是写在 core 里没人用）", () => {
+  test("paint 走 setGauge + core 的 POST/norm 纯函数", async () => {
+    const c = await core();
+    // 这几个是 app.js 画表盘必经的导出；缺一个就是"写了没接线"
+    expect(c.gaugeArc).toBeTypeOf("function");
+    expect(c.tempClass).toBeTypeOf("function");
+    expect(c.levelClass).toBeTypeOf("function");
+    expect(c.classColor).toBeTypeOf("function");
+    expect(c.valueText).toBeTypeOf("function");
+    expect(c.gaugeMarkup).toBeTypeOf("function");
+  });
+
+  test("app.js 代码行里有 gaugeMarkup 调用，且仍从 core.js 取数", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/gaugeMarkup\(/);
+    expect(code).toMatch(/from\s+["']\/pfan-core\.js["']/);
   });
 });

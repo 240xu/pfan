@@ -37,3 +37,23 @@ tr.hi td{color:#3fb950}
 code{background:#21262d;padding:1px 5px;border-radius:3px;font-size:12px}
 /*键盘可达性：原先没有任何 :focus 样式，Tab 走一圈完全看不到焦点在哪 */
 button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}
+
+/* ---- uPlot：库自带 .uplot{width:min-content}，不铺宽度会塌成一条线 ----
+   app.js 的 mount() 会把宿主盒子的实测尺寸喂给 uPlot 并挂 ResizeObserver，
+   这里只需保证宿主本身给它确定的宽度。 */
+.chartbox>.uplot{width:100%!important}
+.chartbox .u-wrap{width:100%}
+/* uPlot 默认 legend 是 14px/居中，panel 里统一到 hint 的字号与灰 */
+.u-legend{font-size:12px;color:#8b949e;padding-top:4px}
+.u-legend .u-marker{border-radius:2px}
+.u-select{background:rgba(88,166,255,.10)}       /* 拖拽选择区用 panel 蓝 */
+.u-cursor-x,.u-cursor-y{border-color:#484f58}
+
+/* ---- SVG 弧形表盘：几何由 core.gaugeArc 算，这里只管摆放 ---- */
+.gauge{display:flex;justify-content:center;margin:2px 0 4px}
+.gauge .g-arc svg,.gauge svg.g-arc{display:block}
+.card .gauge>[id$="-arc"]{line-height:0}
+.g-val{margin-top:-6px}
+.g-note{margin-top:2px}
+/* 读不到读数时的空态：虚弧 + 中性灰，不用语义色（"读不到"≠"过热"） */
+.g-na{color:#484f58}
