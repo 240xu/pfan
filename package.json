@@ -2,13 +2,13 @@
   "name": "pfan",
   "version": "1.0.0",
   "description": "Kernel ACPI helper + temperature daemon + web panel.",
-  "main": "index.js",
+  "private": true,
   "directories": {
     "doc": "docs",
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "bash scripts/ci.sh"
   },
   "keywords": [],
   "type": "module",

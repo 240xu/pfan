@@ -34,7 +34,10 @@ $S core/pfand core/pfan core/platform.sh               "pfan@$HOST:$STAGE/"
 $S server/pfanel.py server/pfan_platform.py server/pfan_core.py "pfan@$HOST:$STAGE/"
 $S panel/index.html panel/styles.css panel/app.js panel/core.js "pfan@$HOST:$STAGE/"
 $S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$STAGE/"
-$S deploy/logrotate.d/pfan                                "pfan@$HOST:$STAGE/"
+# ⚠ 必须用独立暂存名：core/pfan 也叫 $STAGE/pfan，两份 scp 到同一路径会互相覆盖，
+# 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
+#（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
+$S deploy/logrotate.d/pfan                       "pfan@$HOST:$STAGE/logrotate-pfan"
 $R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
@@ -56,7 +59,7 @@ $R "set -e
     sudo -n install -m 644 '$STAGE/pfan_platform.py' /usr/local/bin/pfan_platform.py
     sudo -n install -m 644 '$STAGE/pfan_core.py'     /usr/local/bin/pfan_core.py
     # 3d. ⑭ 日志轮转：不装的话 /var/log/pfand.log 会无限长
-    sudo -n install -m 644 '$STAGE/pfan' /etc/logrotate.d/pfan
+    sudo -n install -m 644 '$STAGE/logrotate-pfan' /etc/logrotate.d/pfan
     # 先做一次语法演练 —— 配置写错了要等一个月才爆，而且那时日志已经不可控
     sudo -n logrotate -d /etc/logrotate.d/pfan >/dev/null
     echo '  /etc/logrotate.d/pfan 已安装并通过 logrotate -d 自检'

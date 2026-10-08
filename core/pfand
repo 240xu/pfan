@@ -60,10 +60,30 @@ dev_ok(){ if [ -n "${PFAN_DEV:-}" ]; then [ -e "$1" ]; else [ -c "$1" ]; fi; }
 # 此后所有读写被静默丢弃约 2 分钟，风扇停在旧档）。
 # 这种文件上 `echo > "$DEV"` 会"成功"却永远到不了硬件 —— 所以两个 fail-safe
 # 分支都必须先认出它：点名危害 + 给恢复命令，且绝不声称尝试/完成过写入。
-# PFAN_DEV 是测试接缝（假设备本来就是普通文件），显式设置时豁免。
-dev_is_regular_file(){ [ -z "${PFAN_DEV:-}" ] && [ -n "${DEV:-}" ] && [ -e "$DEV" ] && [ ! -c "$DEV" ]; }
+# PFAN_DEV 是测试接缝（假设备本来就是普通文件）：它只在 dev_ok 的【正常路径】里
+# 豁免 -c；fail-safe 写入不豁免 —— 豁免就等于允许凭空造文件（I2）。
+# （I2）原先那个"存在且不是字符设备"的守卫已删除：它在【节点缺失】时为假，
+# 于是 fail-safe 自己把普通文件造了出来。两个 fail-safe 分支现在统一先过
+# dev_refuse_write，判据是 [ -c "$DEV" ]，缺节点与普通文件都一样拒写。
 log_dev_hazard(){
     log "CRITICAL: $DEV 存在但不是字符设备（普通文件）—— rmmod 后被重建成普通文件，风扇读写全部被静默丢弃、档位停在旧值。恢复: rm -f $DEV && insmod /opt/pfanctl/pfanctl.ko（或 systemctl restart pfanctl）"
+}
+# I2：写入前提【只有一个】—— 字符设备已经存在（[ -c "$DEV" ]）。
+#   · 节点存在却是普通文件      -> 写进去也到不了硬件（I6，上面那个守卫）；
+#   · 节点缺失（rmmod 后的前提）-> `echo … > "$DEV"` 会把普通文件【凭空创建】出来，
+#     此后 devtmpfs/insmod 因 EEXIST 复建不了节点，而日志还记下"尝试满速/已写满速"
+#     —— 正是 I6/I2 禁止的那种到不了硬件的假成功。缺节点时守卫为假，等于守卫
+#     自己制造了它要检测的危害，所以两个 fail-safe 分支都必须先过这一关。
+#   用法: 写之前先 `dev_refuse_write || exit 1`（一个字节都不许写）。
+dev_refuse_write(){
+    if [ -n "${DEV:-}" ] && [ -e "$DEV" ]; then
+        log_dev_hazard                      # 存在但不是字符设备（I6）
+    elif [ -n "${DEV:-}" ]; then
+        log "CRITICAL: $DEV 不是字符设备（节点缺失，多为 rmmod 之后）—— 在这里 echo 会把普通文件凭空创建出来，此后 devtmpfs/insmod 因 EEXIST 复建不了节点，风扇档位全部写不到硬件。恢复: insmod /opt/pfanctl/pfanctl.ko（或 systemctl restart pfanctl）；不要手工创建 $DEV"
+    else
+        log "DEV 路径为空 -> fail-safe 无法写入任何设备"
+    fi
+    return 1
 }
 F=$(pfan_plat FAN_DEVICE 2>/dev/null) || F=""
 Z=$(pfan_plat THERMAL_ZONE 2>/dev/null) || Z=""
@@ -83,8 +103,10 @@ if ! command -v pfan_plat >/dev/null 2>&1 || [ -z "$F" ] || [ -z "$Z" ] || [ -z 
   log "平台配置不可用(F='$F' Z='$Z' EC='$EC', 加载器 '$_plat_sh') -> fail-safe 满速 100%（先跑 pfan detect）"
   # I6：DEV 是普通文件时，下面的候选写入只会把字节写进一个假节点，
   # 然后日志声称"已写满速"—— 到不了硬件的假话。先认出危害，一行都不写。
-  if dev_is_regular_file; then
-    log_dev_hazard
+  # I2：节点【缺失】时同一个 echo 会把普通文件凭空创建出来（rmmod 后的前提），
+  # 所以这里的判定必须是"是不是字符设备"，而不是"文件存在且不是普通文件"。
+  if [ -z "$DEV" ] || [ ! -c "$DEV" ]; then
+    dev_refuse_write
     exit 1
   fi
   # F 未知时对候选清单里的每个风扇设备都写 100%：哪个能解析哪个生效
@@ -108,12 +130,11 @@ exec 9>"$LOCK"
 if [ -z "$DEV" ] || ! dev_ok "$DEV"; then
   # I6：-c 判定失败的根因若是"节点被重建成普通文件"，echo > $DEV 这一写
   # 只会成功地写进假节点 —— 不许记录"尝试满速"，必须点名危害与恢复命令。
-  if dev_is_regular_file; then
-    log_dev_hazard
-  else
-    log "设备 $DEV 不可用 -> fail-safe 尝试满速"
-    flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
-  fi
+  # I2：根因若是"节点缺失"（rmmod 后的真实前置），同一个 echo 会把普通文件
+  # 【凭空创建】出来并留下假的"尝试满速"—— 两个根因都必须一行不写就退出。
+  # 进到这里意味着 dev_ok 已失败：DEV 为空 / 节点缺失 / 存在但不是字符设备，
+  # 三者都不满足 [ -c "$DEV" ]，直接走统一的危害日志。
+  dev_refuse_write
   exit 1
 fi
 LOG=${PFAN_LOG:-/var/log/pfand.log}

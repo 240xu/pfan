@@ -45,7 +45,7 @@ EC_CMD=0xB5
 |---|---|---|
 | 纯逻辑单测 | pytest / vitest | `validate_params`、`want_for`/`floor_of`/`center_of`、`est_rpm`、`curve_view`；前端曲线渲染、轮询器、编辑器校验 |
 | mock 设备 | 假 `/dev/pfanctl` + 假 thermal zone | `pfand` 应急 / 对账 / fail-safe 全链路（需支持 `DEV`/`TZ` 环境变量覆盖） |
-| 实机只读冒烟 | `scripts/smoke.sh` | 服务态、API 形状、曲线整文件一致、公网入口、无硬编码密钥 |
+| 实机只读冒烟 | `scripts/smoke.sh` | 服务态、API 形状、曲线整文件一致、部署面板与仓库一致、公网入口、无硬编码密钥 |
 | 静态检查 | shellcheck + `bash -n` + `node --check` + ruff | shell / python / js |
 
 **验收判据：能红也能绿** —— 故意改坏一处，测试必须报红。
@@ -74,18 +74,21 @@ EC_CMD=0xB5
 ## §5 开源包装
 
 ```
-LICENSE            GPL-3.0-or-later
-NOTICE             独立逆向实现声明；仅交叉验证 panafanpwr 的**公开发现**，未引用其任何代码
-README.md / README.zh-CN.md / SECURITY.md / CONTRIBUTING.md
-docs/REVERSE-ENGINEERING.md   ACPI/EC 寄存器表与验证方法（含"查不到 RPM"的负面结论）
-docs/PORTING.md                三种路径变体 + 探测方法 + 各机型实测状态
-docs/OPERATIONS.md             部署 / 回滚 / 日志 / 故障处置
-docs/ARCHITECTURE.md           模块边界与数据流
+LICENSE            GPL-3.0-or-later          ← 尚未创建（P3 待办）
+NOTICE             独立逆向实现声明；仅交叉验证 panafanpwr 的**公开发现**，未引用其任何代码  ← 尚未创建
+README.md ✅ / README.zh-CN.md ✗ / SECURITY.md ✅ / CONTRIBUTING.md ✗
+docs/REVERSE-ENGINEERING.md   ACPI/EC 寄存器表与验证方法（含"查不到 RPM"的负面结论）  ← 尚未创建
+docs/PORTING.md                三种路径变体 + 探测方法 + 各机型实测状态  ← 尚未创建
+docs/OPERATIONS.md             部署 / 回滚 / 日志 / 故障处置  ← ✅ 已存在（2026-10-07 逐条核实）
+docs/ARCHITECTURE.md           模块边界与数据流  ← 尚未创建
 ```
 
-**脱敏**（`scripts/sanitize.sh`，有残留则拒绝 push）：隧道 UUID · LAN IP · token 文件 · 记忆文档 · `audit/`。
+（✅/✗ 为 2026-10-07 对仓库文件清单的核对；缺的都是 P3 待办，不是遗漏。）
 
-**落点**：public `240xu/pfan`（当前 private）。**部署**：`scripts/deploy.sh`（rsync over ssh）取代 base64+ssh。
+**脱敏**（`scripts/sanitize.sh`，有残留则拒绝 push）：隧道 UUID · LAN IP · token 文件 · 记忆文档 · `audit/`。
+—— `scripts/sanitize.sh` **尚未实现**（2026-10-07 核实：`scripts/` 只有 ci/deploy/install-hooks/smoke-lib/smoke）。
+
+**落点**：public `240xu/pfan`（当前 private）。**部署**：`scripts/deploy.sh`（**scp** over ssh，非本节早稿写的 rsync；2026-10-07 核实 `deploy.sh:33-37` 用 `scp`）取代 base64+ssh。
 
 ## §6 执行顺序
 
@@ -122,39 +125,50 @@ docs/ARCHITECTURE.md           模块边界与数据流
 
 ## 附录 A：P0 复审延期项（Minor，不进修复轮，留待顺手处理）
 
-| 位置 | 问题 |
-|---|---|
-| `README:22` | `./scripts/install-hooks.sh` 在 Termux 失败（`/usr/bin/env`），应写 `bash scripts/install-hooks.sh` |
-| `README:31` | "机器不可达时只跑 ci，smoke 不 skip 只 FAIL" 自相矛盾（**钩子**会 skip，smoke 本身从不 skip），应拆成两条 |
-| `BASELINE.sha256` | `server/pfanel.py` 已过期且仓库内无说明（其唯一消费者 `verify-import.sh` 已在 43da01a 删除） |
-| `package.json` | `"test": "echo Error... && exit 1"` 使 `npm test` 恒失败；`"main": "index.js"` 不存在 |
-| `smoke.sh:63` | 连接失败时 `$(... || echo 000)` 可能得到 `000000`；取 `${code:0:3}` |
-| `smoke.sh` 第 5 段 | 扫的是**仓库**面板副本，而线上服务的是 `/opt/beszel/beszel_data/pfan.html`（今日字节一致；应改名或加部署件哈希） |
-| `.editorconfig` | 比计划多了 `trim_trailing_whitespace` 与 md/json 缩进（无害偏离，已记录） |
+> 状态列由 2026-10-07 的清理轮逐条核实回填；行号为核实当时的行号。
+> 回归网：`tests/shell/test_repo_hygiene.sh`（RED→GREEN 记录在该轮交接说明里）。
 
-**另记（P2 期间已知的运行时特性）**：`core/pfand:106` 的 `ensure_s0i3()` 启动时会短暂写 `_FSL 1 0`（约 0.3s），在该窗口内轮询会让 smoke 的 `[1,120]` 检查出现罕见误报。
+| 位置 | 问题 | 状态（2026-10-07 核实） |
+|---|---|---|
+| `README:22` | `./scripts/install-hooks.sh` 在 Termux 失败（`/usr/bin/env`），应写 `bash scripts/install-hooks.sh` | ✅ **已修**：Setup 改为 `bash scripts/install-hooks.sh`，本机实跑 rc=0（且顺带刷新了 `.git/hooks/pre-push` 里那份过期副本）；守卫 T3 |
+| `README:31` | "机器不可达时只跑 ci，smoke 不 skip 只 FAIL" 自相矛盾（**钩子**会 skip，smoke 本身从不 skip），应拆成两条 | ✅ **已修**：拆成「可达/不可达两种情形」+「smoke 自身从不跳过」两条；守卫 T3 钉死矛盾句不得回归 |
+| `hooks/pre-push`（核实该条时的**新发现**） | 钩子在机器不可达时于 `probe_err=$(ssh …)` 那行因 `set -e` 直接退出（rc=255），第 14–19 行「打印跳过原因 / `PFAN_SKIP_SMOKE=1` 放行」是死代码，push 照样被拒 | ⚠️ **开放**：`hooks/` 不在本轮 scope，已上报协调者。README 已改为如实描述实际行为（本地 git 仓库实测验证） |
+| `BASELINE.sha256` | `server/pfanel.py` 已过期且仓库内无说明（其唯一消费者 `verify-import.sh` 已在 43da01a 删除） | ✅ **已处置 = 删除**。理由：它是一次性导入门禁（43da01a 的提交说明已把消费者退役），复活消费者只会得到「改任何受管文件都要重算」的伪控制 —— 仓库可写者能同时改文件和哈希，没有信任锚；真实一致性由 `smoke.sh` 对**目标机**的比对（第 4 段曲线、第 5 段部署件）承担。守卫 T4：「BASELINE.sha256 要么有活消费者，要么不存在」。`BASELINE.date` 是同一门禁的时间戳，无控制语义，留待协调者决定是否同撤 |
+| `package.json` | `"test": "echo Error... && exit 1"` 使 `npm test` 恒失败；`"main": "index.js"` 不存在 | ✅ **已修**：`test` → `bash scripts/ci.sh`（`npm test` 作为唯一惯例入口应跑全量套件；只挂 js 套件会造出一个更弱的第二入口，把 shell/python 检查藏起来），`main` 删除，另加 `private: true` 防误发布；守卫 T1/T2，`npm test` 实跑 rc=0 |
+| `smoke.sh:63`（现 88/94 行） | 连接失败时 `$(… \|\| echo 000)` 可能得到 `000\n000` / `000000`；取 `${code:0:3}` | ✅ **已修**：两处状态码赋值后立刻切 3 位（`code=${code:0:3}`、`c=${c:0:3}`）；守卫 T5（断言的是**赋值后切片**，不是错误文案里的顺手截断） |
+| `smoke.sh` 第 5 段 | 扫的是**仓库**面板副本，而线上服务的是 `/opt/beszel/beszel_data/`（今日字节一致；应改名或加部署件哈希） | ✅ **已修**：改为对 4 个部署件（`index.html/styles.css/app.js/core.js`，即 `PANEL_DIR` 的实际内容）做 ssh `sha256sum` 与仓库副本比对，分叉即报红；密钥扫描仓库与部署件两边都做；守卫 T6。**部署件字节是否真与仓库一致需实机 smoke 才能证实 [未验证]** |
+| `.editorconfig` | 比计划多了 `trim_trailing_whitespace` 与 md/json 缩进（无害偏离，已记录） | ⚠️ **仍开放**：按原样保留（无害） |
+
+**另记（P2 期间已知的运行时特性）**：`core/pfand` 的 `ensure_s0i3()`（定义在 182 行，其中
+`_FSL 1 0` 在 185 行，启动调用在 233 行 —— 原记 106 行已漂移）启动时会短暂写 `_FSL 1 0`
+（约 0.3s），在该窗口内轮询会让 smoke 的 `[1,120]` 检查出现罕见误报。
 
 ## 附录 B：P1 复审延期项（Minor，不进修复轮）
 
-| 位置 | 问题 |
-|---|---|
-| `panel/index.html:14` | 副标题仍写死数据源 `thermal_zone9`；移植到别的机器即错，且不在静态扫描的 3 文件集合内。应改为从 `/api/now` 渲染或直接去掉 |
-| `core/pfanctl/pfanctl.c:98-103` | `ec88` 便捷语法硬编码 EC 路径；仓库内无调用方，但属于本阶段应去机器化的模块 → 并入 ⑱ |
-| `core/pfan` `detect --write` | 非原子写；中途崩溃会留下半截配置，下次开机 fail-close。应 temp + `mv` |
-| `EC_CMD` | 两侧加载器都要求、`detect` 也写入，但**没有任何消费者**（死键）。spec 要求它存在 → 补注释说明用途 |
-| `panel/app.js:40` vs `:77` | free 模式下看门狗是否接管，两处文案互相矛盾；代码（`GUARDED`）表明**会接管** → `:77` 与 `guard()` docstring 过期 |
-| `server/pfanel.py` `/api/levels` | 仍返回 `free_range:[0,120]` 与 "0~120"，而 0 在别处全面禁止（既存问题，纯文案矛盾） |
-| 目标机 `/opt/beszel/beszel_data/pfan.html` | 拆分后遗留的旧单文件；deploy 会备份但从不删除，无任何在用消费者 |
+> 状态列与行号由 2026-10-07 逐条核实回填。`panel/`、`server/`、`core/` 归其他代理/
+> 后续轮次，本轮只更新本表、不动代码。
 
-**修复轮中顺手解决的（原为 Minor）**：`pfan set` 里 `$DEV` 未加引号；`PFAN_LOG` 在 fail-safe 分支之后才生效。
+| 位置 | 问题 | 状态（2026-10-07 核实） |
+|---|---|---|
+| `panel/index.html:14` | 副标题仍写死数据源 `thermal_zone9`；移植到别的机器即错，且不在静态扫描的 3 文件集合内。应改为从 `/api/now` 渲染或直接去掉 | ⚠️ **仍开放**（行号未变，仍是 14；`panel/` 归并行代理） |
+| `core/pfanctl/pfanctl.c` ec88 便捷语法（原记 98-103） | 硬编码 EC 路径；仓库内无调用方，但属于本阶段应去机器化的模块 → 并入 ⑱ | ⚠️ **仍开放，行号漂移：现 139–145**（`"ec88"` 展开为 `\_SB.PCI0.LPCB.EC0.EC88 …`） |
+| `core/pfan` `detect --write` | 非原子写；中途崩溃会留下半截配置，下次开机 fail-close。应 temp + `mv` | ⚠️ **仍开放**（现 `core/pfan:134` 仍是 `printf '%s' "$out" > "$2"`） |
+| `EC_CMD` | 两侧加载器都要求、`detect` 也写入，但**没有任何消费者**（死键）。spec 要求它存在 → 补注释说明用途 | ⚠️ **仍开放**（`platform/platform.conf.example:12` 仍无注释；行为消费者仍只有 `server/pfan_platform.py:12` 的 `REQUIRED` 校验与 `core/pfan:131` 的写入） |
+| `panel/app.js` free 模式看门狗文案互相矛盾（原记 `:40` vs `:77`） | 代码（`GUARDED`）表明**会接管** → 文案与 `guard()` docstring 过期 | ⚠️ **仍开放，且扩大到三处**（行号漂移）：`panel/app.js:70`「看门狗 82°C 仍会强制回退保护」**与代码一致**；`panel/app.js:109`「看门狗在此模式下不接管」**矛盾**；新增第三处 `server/pfanel.py:131-132` `guard()` docstring 写「free 模式不看门狗」也**矛盾** —— 代码为准：`GUARDED = ("quiet","s0i3","free")`（`pfanel.py:129`），free 会接管。两处待改（归 `panel/`、`server/` 负责人） |
+| `server/pfanel.py` `/api/levels` | 仍返回 `free_range:[0,120]` 与 "0~120"，而 0 在别处全面禁止（既存问题，纯文案矛盾） | ⚠️ **仍开放**（现 `pfanel.py:550-551`；`set_level` 已禁 0，接口文案未跟上） |
+| 目标机 `/opt/beszel/beszel_data/pfan.html` | 拆分后遗留的旧单文件；deploy 会备份但从不删除，无任何在用消费者 | **[未验证]**（部署件在目标机）。仓库侧可核实：`deploy.sh:28` 确实只备份、全程无删除；仓库内除该备份行外无任何消费者 |
 
-**已知语义特性（P2 处理）**：`core/pfand:106` 的 `ensure_s0i3()` 启动时短暂写 `_FSL 1 0`（约 0.3s），
+**修复轮中顺手解决的（原为 Minor）**：`pfan set` 里 `$DEV` 未加引号（现 `core/pfan` 58/78/159 行
+均为 `> "$DEV"`，2026-10-07 复核 ✅）；`PFAN_LOG` 在 fail-safe 分支之后才生效
+（现 `core/pfand:33` 在 fail-safe `exit 1`（103 行）之前就完成赋值 ✅）。
+
+**已知语义特性（P2 处理）**：`core/pfand` 的 `ensure_s0i3()` 启动时短暂写 `_FSL 1 0`（约 0.3s），
 该窗口内轮询会让 smoke 的 `[1,120]` 出现罕见误报 —— deploy 的 4b 等待接管判据已覆盖部署路径。
 
-### 附录 C：P2 裁决（2026-10-06）
+### 附录 C：P2 裁决（2026-10-06；状态 2026-10-07 复核）
 
-| # | 裁决 | 理由 |
-|---|---|---|
-| C1 | ⑱ 的 `.read` 回调**推迟**到后续阶段 | 加了 `.read` 但三个消费者（pfan/pfand/pfanel）不同时迁移就毫无收益，而只有全部迁完才能去掉 RESULT 行；这三条共同维持风扇控制，热路径上的协调迁移应单独一个阶段做双路径一致性验证（`.read` 与 dmesg 同时读、断言相等），不塞进 backlog 扫尾。dmesg 路径当前全绿（smoke 21/21）。⑱ 中的两个真实缺陷（死分支、八进制解析）已修复并测试。 |
-| C2 | panel 不发任何 CORS 头 | 面板与 API 同源（`API=""`），通配头只会让 LAN 内任意网页跨域读遥测；`smoke.sh` 2b 段用 **GET** 断言（旧版无 `do_HEAD`，HEAD 会 501 假阳性）。 |
-| C3 | pfanel 状态路径接缝与 pfand **同名** | `PFAN_LOCK/DEV/DMESG/CONF/CURVE_FILE` 两边一致，只有一套词汇；缺省值必须等于生产值，由测试断言。 |
+| # | 裁决 | 理由 | 状态（2026-10-07 核实） |
+|---|---|---|---|
+| C1 | ⑱ 的 `.read` 回调**推迟**到后续阶段 | 加了 `.read` 但三个消费者（pfan/pfand/pfanel）不同时迁移就毫无收益，而只有全部迁完才能去掉 RESULT 行；这三条共同维持风扇控制，热路径上的协调迁移应单独一个阶段做双路径一致性验证（`.read` 与 dmesg 同时读、断言相等），不塞进 backlog 扫尾。dmesg 路径当前全绿（smoke 21/21）。⑱ 中的两个真实缺陷（死分支、八进制解析）已修复并测试。 | **仍有效**：`core/pfanctl/pfanctl.c` 仍无 `.read` 回调（grep 0 命中），三个消费者仍走 dmesg RESULT（`pfanel._result_state()` 读 `PFAN_DMESG`）；死分支已删（`pfanctl.c:100-105` 注释 + 新分支可查）、八进制解析已由 `pfan_parse` 收口（`pfanctl.c:48-68`，`tests/shell/test_pfanctl_source.sh` + `test_control_paths.sh` T3 断言）。原理由里「smoke 21/21」需实机才能证实 **[未验证]** |
+| C2 | panel 不发任何 CORS 头 | 面板与 API 同源（`API=""`），通配头只会让 LAN 内任意网页跨域读遥测；`smoke.sh` 2b 段用 **GET** 断言（旧版无 `do_HEAD`，HEAD 会 501 假阳性）。 | **仍有效**：`pfanel._send()` 不发 `Access-Control-Allow-Origin`（2026-10-07 复核 `server/pfanel.py:499`），smoke 2b 断言「完全没有该头」 |
+| C3 | pfanel 状态路径接缝与 pfand **同名** | `PFAN_LOCK/DEV/DMESG/CONF/CURVE_FILE` 两边一致，只有一套词汇；缺省值必须等于生产值，由测试断言。 | **仍有效**：五个接缝两边同名同缺省（`core/pfand:32-51` / `server/pfanel.py:45,60,160,178,361`），`tests/shell/test_seam_defaults.sh` 逐条钉住 |

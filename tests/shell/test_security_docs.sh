@@ -58,14 +58,21 @@ elif sed -n "${tokline}p" "$PF" | grep -qi 'origin'; then
 else
   ok "代码：token 单独判定（第 $tokline 行，不含 origin）"
 fi
-# 5b) token 判定必须先于 Origin 判定，且中间必须有 deny+return（两道门串联，第一道不通过就走人）
+# 5b) token 判定必须先于 Origin 判定，且【两者都在】窗口里：_deny 单独出现不算数。
+#     OR 语义（grep -q '_deny\|return'）曾让"删掉 return"静默通过：403 发出去之后
+#     代码继续跑到 set_level，档位照样写进设备 —— HTTP 层看不见（urllib 收到 403
+#     就返回了），只有设备侧流水才留得下证据。所以 deny 与 return 必须【同时】命中，
+#     且 return 必须是独立语句（行首缩进 + return），不是注释/字符串里出现的字样。
 orgline=$(grep -n 'if origin and not origin_allowed' "$PF" | head -1 | cut -d: -f1)
 if [ -n "$tokline" ] && [ -n "$orgline" ] && [ "$tokline" -lt "$orgline" ]; then
   ok "代码：token 判定（$tokline 行）先于 Origin 判定（$orgline 行）"
-  if sed -n "$((tokline+1)),${orgline}p" "$PF" | grep -q '_deny\|return'; then
-    ok "代码：token 不通过即 deny+return（Origin 判定救不回一个没有 token 的请求）"
+  win=$(sed -n "$((tokline+1)),${orgline}p" "$PF")
+  if ! echo "$win" | grep -q '_deny'; then
+    ng "token 判定后窗口内没有 _deny —— 无 token 的请求连 403 都拿不到"
+  elif ! echo "$win" | grep -qE '^[[:space:]]*return([[:space:];]|$)'; then
+    ng "token 判定后有 _deny 却【没有 return】—— 403 发出后继续执行，写操作照样落到设备上"
   else
-    ng "token 判定后没有 deny/return —— 可能被后面的 Origin 判定放行（OR 语义）"
+    ok "代码：token 不通过即 deny+return（Origin 判定救不回一个没有 token 的请求）"
   fi
 else
   ng "代码：找不到先于 Origin 判定的 token 判定（门顺序变了？）"
@@ -75,11 +82,16 @@ fi
 for kw in '无条件' '不能替代' '只比对主机名' '不带 Origin'; do
   grep -q "$kw" SECURITY.md && ok "文档写明 $kw" || ng "SECURITY.md 未写明「$kw」—— 文档会掩盖门的真实规则"
 done
-# 5d) 真正的行为断言必须存在（文档措辞可以骗人，HTTP 行为测试骗不了）
-if grep -q 'test_write_requires_token_even_from_allowed_origin' tests/python/test_http.py; then
-  ok "行为测试 test_write_requires_token_even_from_allowed_origin 存在（指向真实行为断言）"
-else
-  ng "缺行为测试：无 token + 白名单 Origin 必须 403（只靠文档关键词不够）"
-fi
+# 5d) 真正的行为断言必须存在（文档措辞可以骗人，HTTP 行为测试骗不了）。
+#     第二条是唯一能在 HTTP 层抓到"deny 之后没有 return"的检查：
+#     只看 403 状态码永远是绿的，必须看【服务端有没有留下副作用】。
+for t in test_write_requires_token_even_from_allowed_origin \
+         test_tokenless_post_has_no_server_side_effect; do
+  if grep -q "$t" tests/python/test_http.py; then
+    ok "行为测试 $t 存在（指向真实行为断言）"
+  else
+    ng "缺行为测试 $t（只靠文档关键词不够；无副作用那条删掉后 deny-without-return 就没人抓）"
+  fi
+done
 
 echo "test_security_docs: fails=$fails"; exit "$fails"

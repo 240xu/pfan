@@ -47,7 +47,9 @@ fi
 echo "== T2: set 之后锁必须是自由的 =="
 if timeout 5 flock -n "$T/lock" true 2>/dev/null; then ok "锁可立即获取"; else ng "锁被残留持有"; fi
 
-echo "== T3: 前导零必须被拒（内核 simple_strtol base 0 会把 080 解析成 0 -> 停转）=="
+echo "== T3: 0 与前导零必须被拒（0 = _FSL 0 风扇停转；080 这类写法十进制读是 80、老八进制读是 0，静默改写都不对）=="
+# pfan_parse 现在按十进制解析（080 -> 80），内核八进制截断那条老路已不存在（M9）；
+# 本用例守的是 `pfan set` 自己的入口卫生：不接受 0、也不接受前导零。
 for v in 0 00 008 080 050 099; do
   out=$(run_set "$v"); rc=$?
   if [ $rc -ne 0 ] && echo "$out" | grep -q '1\.\.120'; then ok "set $v 被拒"
@@ -136,5 +138,45 @@ rm -f "$T/hz.log2"
 out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/hz2.conf" PFAN_LOCK="$T/lock" PFAN_LOG="$T/hz.log2" \
       bash core/pfand 2>&1); rc=$?
 chk_hazard "$T/hz.log2" "$T/hzdev2" "候选分支普通文件" $rc
+
+# ---- I2：DEV 节点【缺失】（不是普通文件）—— 旧守卫只看"存在且非字符设备"，缺节点时为假 ----
+# 2026-10-06 事故的真实前置是 rmmod 把节点删掉了。此时 -e 为假 -> 守卫判"没问题"，
+# 接着 `echo … > "$DEV"` 把节点【凭空创建成普通文件】并记下"尝试满速/已写满速"：
+# 既造出了 I6 要防的那个假节点（此后 insmod/devtmpfs 因 EEXIST 复建不了），
+# 又写下了到不了硬件的假成功日志。T8/T9 都预先把文件建好，永远踩不到这条分支。
+chk_missing(){ # chk_missing <日志> <本应保持不存在的DEV路径> <场景名> <rc>
+  local logf="$1" devf="$2" name="$3" rc="$4"
+  if [ "$rc" -eq 0 ]; then ng "$name: rc=0（fail-safe 必须非零退出让 systemd 重试）"; return; fi
+  if grep -q 'CRITICAL' "$logf" 2>/dev/null && grep -q 'insmod' "$logf" 2>/dev/null; then
+    ok "$name: 点名危害+恢复命令: $(grep 'CRITICAL' "$logf" | tail -1 | cut -c1-96)"
+  else
+    ng "$name: 没有 CRITICAL 危害日志/恢复命令: $(tail -1 "$logf" 2>/dev/null | cut -c1-96)"
+  fi
+  if grep -q '尝试满速\|已写满速' "$logf" 2>/dev/null; then
+    ng "$name: 仍声称尝试/完成写入（节点根本不存在，写不到硬件）: $(grep '尝试满速\|已写满速' "$logf" | tail -1)"
+  else
+    ok "$name: 没有虚假的写入声明"
+  fi
+  if [ -e "$devf" ]; then
+    ng "$name: 缺失的节点被凭空创建成了 $([ -f "$devf" ] && echo 普通文件 || echo 非普通文件)（$(wc -c < "$devf" 2>/dev/null) 字节）—— insmod/devtmpfs 将因 EEXIST 复建不了"
+  else
+    ok "$name: 未凭空创建 $devf"
+  fi
+}
+
+echo "== T10: DEV 节点缺失（rmmod 后）—— 不得创建普通文件、不得声称已写满速（I2）=="
+[ -n "${PFAN_DEV:-}" ] && ng "测试环境泄了 PFAN_DEV（会让 -c 判定走测试接缝）"
+rm -f "$T/gone1" "$T/mn.log1"
+mkplat_hazard "$T/mn1.conf" "$T/gone1"
+out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/mn1.conf" PFAN_LOCK="$T/lock" PFAN_LOG="$T/mn.log1" \
+      bash core/pfand 2>&1); rc=$?
+chk_missing "$T/mn.log1" "$T/gone1" "主分支节点缺失" $rc
+
+echo "== T11: 平台配置缺键 + DEV 节点缺失 —— 候选 fail-safe 分支同样不许创建节点（I2）=="
+rm -f "$T/gone2" "$T/mn.log2"
+mkplat_hazard "$T/mn2.conf" "$T/gone2" devonly
+out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/mn2.conf" PFAN_LOCK="$T/lock" PFAN_LOG="$T/mn.log2" \
+      bash core/pfand 2>&1); rc=$?
+chk_missing "$T/mn.log2" "$T/gone2" "候选分支节点缺失" $rc
 
 echo "test_control_paths: fails=$fails"; exit "$fails"

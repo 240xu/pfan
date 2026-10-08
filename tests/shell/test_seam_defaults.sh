@@ -11,8 +11,26 @@ fails=0; ok(){ echo "  [ok]   $1"; }; ng(){ echo "  [FAIL] $1"; fails=$((fails+1
 pin(){ # pin <file> <literal> <说明>
   local f="$1" lit="$2" why="$3"
   [ -f "$f" ] || { ng "缺文件 $f"; return; }
-  if grep -qF "$lit" "$f"; then ok "$f 含 $lit  ($why)"
-  else ng "$f 缺 $lit  ($why)"; fi
+  grep -qF -- "$lit" "$f" || { ng "$f 缺 $lit  ($why)"; return; }
+  # 锚定（Minor 10）：只做 grep -qF 的话，字面量被【延长】时照样命中子串 ——
+  # `PFAN_LOCK:-/run/pfanel.lock.bak` 与 `PFAN_DMESG:-dmesgX` 都会假绿。
+  # 这里要求字面量后面紧跟的不是路径/标识符字符（即值到此为止），
+  # 后缀漂移一律判红。awk 的 index() 是字面查找，literal 里的 . " ( ) 不用转义。
+  if awk -v lit="$lit" '
+    {
+      s = $0
+      while (1) {
+        i = index(s, lit)
+        if (i == 0) break
+        if (substr(s, i + length(lit)) !~ /^[A-Za-z0-9_.\/~+-]/) { found = 1; exit }
+        s = substr(s, i + length(lit))
+      }
+    }
+    END { exit found ? 0 : 1 }' "$f"; then
+    ok "$f 含 $lit  ($why)"
+  else
+    ng "$f 里的 $lit 被延长成了别的值（后缀漂移）—— 缺精确的 $lit  ($why)"
+  fi
 }
 
 echo "== T1: PFAN_LOCK 三处必须同为 /run/pfanel.lock（单槽设备共锁）=="
@@ -20,8 +38,11 @@ pin core/pfand  'PFAN_LOCK:-/run/pfanel.lock' 'pfand'
 pin core/pfan   'PFAN_LOCK:-/run/pfanel.lock' 'pfan'
 pin server/pfanel.py 'os.environ.get("PFAN_LOCK", "/run/pfanel.lock")' 'pfanel'
 
-echo "== T2: PFAN_DMESG 两处必须同为 dmesg（消费者都靠它找 RESULT 行）=="
+echo "== T2: PFAN_DMESG 三处必须同为 dmesg（消费者都靠它找 RESULT 行）=="
+# core/pfan 是本次提交新增的第三个消费者：`PFAN_DMESG:-dmesgX` 会让 `pfan get`
+# 静默执行 `sudo -n dmesgX`、一条 RESULT 都读不到，而 T2 旧版只钉 pfand/pfanel。
 pin core/pfand  'PFAN_DMESG:-dmesg' 'pfand'
+pin core/pfan   'PFAN_DMESG:-dmesg' 'pfan'
 pin server/pfanel.py 'os.environ.get("PFAN_DMESG", "dmesg")' 'pfanel'
 
 echo "== T3: 状态与配置文件路径 =="

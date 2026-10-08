@@ -11,7 +11,7 @@
 </head>
 <body>
 <h1>Panasonic CFQV8 风扇控制台</h1>
-<div class="sub">ACPI <code>TFN1._FSL</code> 档位控制 · EC <code>0x76</code> 实时状态 · 数据源 <code>/sys/class/thermal/thermal_zone9</code> <span id="conn-st" style="font-weight:600"></span></div>
+<div class="sub">ACPI <code>TFN1._FSL</code> 档位控制 · EC <code>0x76</code> 实时状态 · 数据源 <code>x86_pkg_temp</code> 热区（zone 序号由 <code>pfan detect</code> 决定） <span id="conn-st" style="font-weight:600"></span></div>
 
 <div class="mode">
   <span class="st d" id="m-st">守护模式</span>
@@ -99,7 +99,7 @@
 
 <div class="rows">
   <div class="panel"><h2>档位表（_FPS 官方数据）</h2>
-    <table id="fps"><thead><tr><th>档位%</th><th>RPM</th><th>噪音 mdB</th><th>功率 W</th></tr></thead><tbody></tbody></table>
+    <table id="fps"><thead><tr><th>档位%</th><th>RPM</th><th>噪音dB</th><th>功率 W</th></tr></thead><tbody></tbody></table>
     <div class="hint">噪音值取自 <code>/sys/bus/acpi/devices/INT3404:00/state*</code> 第 4 字段。25% 比 100% 安静 37.5 dB。</div>
   </div>
   <div class="panel"><h2>最近采样</h2>

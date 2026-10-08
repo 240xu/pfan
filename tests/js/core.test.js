@@ -297,10 +297,16 @@ describe("M3: 滞后阈值随服务端 IV，不再硬编码 20s", () => {
     expect(code).toMatch(/staleAgeLimit\(/);
   });
 
-  test("app.js: boot / 打开编辑器 / 保存参数都会把服务端 IV 灌给阈值", async () => {
+  test("app.js: boot/saveParams/openEditor 各自都把服务端 IV 灌给阈值（逐点，非计数）", async () => {
     const code = codeOnly(await appSrc());
-    const calls = code.match(/applyIV\(/g) || [];   // 定义 + >= 2 个调用点
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    // 计数式断言会被"删掉 boot 那次调用、在别处多加一次"骗过：复审实测删掉 boot 的
+    // applyIV 后整套仍 54 绿 —— 而 boot 是页面加载时唯一的初始化点，删了它 STALE_AGE
+    // 就永远停在 20s，M3 的原始缺陷（IV=30 却一直报"数据滞后"）原样回归。
+    for (const fn of ["boot", "saveParams", "openEditor"]) {
+      const body = fnBody(code, fn);
+      expect(body, `找不到 ${fn}`).toBeTruthy();
+      expect(body, `${fn} 没有调用 applyIV —— 服务端 IV 不会灌进阈值`).toMatch(/applyIV\(/);
+    }
   });
 });
 
@@ -407,5 +413,150 @@ describe("M5: renderCurve 的纯逻辑抽进 core.js 可测", () => {
     const code = codeOnly(await appSrc());
     expect(code).toMatch(/curveRowsHtml\(/);
     expect(code).toMatch(/curveParamsHtml\(/);
+  });
+});
+
+// ================= 前端修复轮（U1..U5） =================
+
+async function htmlSrc() {
+  const { readFileSync } = await import("node:fs");
+  return readFileSync(new URL("../../panel/index.html", import.meta.url), "utf8");
+}
+
+describe("U1: API 字符串进 innerHTML 必须经 esc()（导出了却没接线 = 漏掉的 XSS 缝）", () => {
+  // d.curve 与事件 kind/msg 是仅有的【字符串型】API 数据 → innerHTML 路径。
+  // 服务端当前会白名单/构造它们，但面板是公网可达的读端点，
+  // 一行 esc() 让这条缝不依赖服务端恰好没写错。
+  test("d.curve（paint/renderCurve）与事件 kind/msg 的插值都包了 esc(", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code, "paint 的 else-if 分支把 d.curve 拼进 innerHTML").toMatch(/esc\(\s*cv\s*\)/);
+    expect(code, "renderCurve 的兜底分支把 cv2 拼进 innerHTML").toMatch(/esc\(\s*cv2\s*\)/);
+    expect(code, "renderEvents 把 x.msg 拼进 innerHTML").toMatch(/esc\(\s*x\.msg\s*\)/);
+    expect(code, "renderEvents 把事件类型名拼进 innerHTML").toMatch(
+      /esc\(\s*kind\[x\.kind\]\s*\|\|\s*x\.kind\s*\)/);
+  });
+});
+
+describe("U2: drawScatter 的 Chart 配置（scales 必须在 options 顶层）", () => {
+  // 把 new Chart(...) 的配置对象字面量抠出来 eval，按【真实结构】断言 ——
+  // 纯正则只能看到 "scales 存在于源码里"，看不出它嵌在哪一层。
+  function chartConfig(src, anchor) {
+    const i = src.indexOf(anchor);
+    expect(i, `找不到 ${anchor}`).toBeGreaterThan(-1);
+    const brace = src.indexOf("{", i);
+    let depth = 0, end = -1;
+    for (let k = brace; k < src.length; k++) {
+      if (src[k] === "{") depth++;
+      else if (src[k] === "}") {
+        depth--;
+        if (depth === 0) { end = k; break; }
+      }
+    }
+    expect(end, "配置对象没闭合").toBeGreaterThan(-1);
+    // data 段引用 drawScatter 的局部变量（pts/ideal）—— 给桩，只对结构求值；
+    // options 段是纯字面量（数字/字符串/箭头/模板串），eval 后拿到真实嵌套层级。
+    const pts = [], ideal = [];
+    return eval("(" + src.slice(brace, end + 1) + ")");
+  }
+
+  test("options.scales 在顶层且 min/max 生效；plugins 里没有 scales", async () => {
+    const code = codeOnly(await appSrc());
+    const cfg = chartConfig(code, "ch3=new Chart(");
+    expect(cfg.options.scales, "options.scales 缺失 —— 轴配置没生效").toBeTruthy();
+    expect(cfg.options.scales.x.min).toBe(35);
+    expect(cfg.options.scales.x.max).toBe(105);
+    expect(cfg.options.scales.y.min).toBe(0);
+    expect(cfg.options.plugins.scales, "scales 嵌进了 plugins（Chart.js 会忽略它）").toBeUndefined();
+  });
+});
+
+describe("U3: 模块作用域 / 未处理 Promise / 视图刷新（浏览器里真的能跑）", () => {
+  test("curLevel 必须显式声明 —— 模块是严格模式，未声明赋值会让 paint 每次抛 ReferenceError", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/\blet\s+[^;]*\bcurLevel\b/);
+  });
+
+  test("index.html 内联 onclick 调用的每个函数都必须导出到 window", async () => {
+    const html = await htmlSrc();
+    const names = [...html.matchAll(/onclick="(\w+)\s*\(/g)].map(m => m[1]);
+    expect(names.length, "index.html 应有内联 onclick").toBeGreaterThan(0);
+    const code = codeOnly(await appSrc());
+    for (const n of names) {
+      expect(code, `缺 window.${n}=${n} —— 模块顶层函数不是全局，内联 onclick 找不到它`).toMatch(
+        new RegExp(`window\\.${n}\\s*=\\s*${n}\\b`));
+    }
+  });
+
+  test("boot 的初始化请求各自独立 try/catch（单个失败不拖垮曲线/散点视图）", async () => {
+    const body = fnBody(codeOnly(await appSrc()), "boot");
+    expect(body, "找不到 boot").toBeTruthy();
+    expect((body.match(/try\s*\{/g) || []).length,
+      "levels/mode/profile/curve 各一个 try —— 合并成一个 = levels 失败后曲线视图永不渲染").toBeGreaterThanOrEqual(4);
+  });
+
+  test("boot() 顶层调用挂 catch（否则尾段异常 = 未捕获 rejection）", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/boot\(\)\s*\.catch\(/);
+  });
+
+  test("buildLv: DOM 缺失时不能把 boot 砸死", async () => {
+    const body = fnBody(codeOnly(await appSrc()), "buildLv");
+    expect(body).toMatch(/if\s*\(\s*!box\s*\)/);
+  });
+
+  test("曲线表「◀ 现在」高亮随 8s 轮询刷新（paint 内重渲染 cvtbl）", async () => {
+    const body = fnBody(codeOnly(await appSrc()), "paint");
+    expect(body, "renderCurve 全量刷新间隔 180s，中间高亮不动 = 视图永不刷新").toMatch(
+      /curveRowsHtml\(/);
+  });
+
+  test("paint 把两条进度条都钳在 ≤100%（API 允许 1..120，120% 宽度会溢出卡片）", async () => {
+    const body = fnBody(codeOnly(await appSrc()), "paint");
+    expect((body.match(/Math\.min\(100/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("saveParams 发送前本地拦 NaN 与温度乱序（复用 checkTempOrder）", async () => {
+    const body = fnBody(codeOnly(await appSrc()), "saveParams");
+    expect(body, "空输入 parseInt→NaN→JSON null→服务端 500").toMatch(/Number\.isFinite/);
+    expect(body, "温度递增校验 preview 有、保存路径没有 = 发一个注定 400 的请求").toMatch(
+      /checkTempOrder\(/);
+  });
+});
+
+describe("U4: 文案 / 单位 / 可访问性", () => {
+  test("renderCurve 不再读 window.GUARD_TEMP（从未赋值 → 恒 82），直接用模块变量", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).not.toMatch(/window\.GUARD_TEMP/);
+    expect(fnBody(code, "renderCurve")).toMatch(/\bGUARD_TEMP\b/);
+  });
+
+  test("c-rpm-note 显示 dB（fps[1] 是 mdB，直接拼出 '35000mdB' 对用户是乱码）", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/d\.fps\[1\]\s*\/\s*1000/);
+    expect(code).not.toMatch(/d\.fps\[1\]\s*\+\s*"mdB"/);
+  });
+
+  test("FPS 表噪音列换算成 dB（与相邻 hint 的 '37.5 dB' 同单位），表头不再写 mdB", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).toMatch(/v\[1\]\s*\/\s*1000/);
+    const html = await htmlSrc();
+    expect(html).not.toMatch(/噪音\s*mdB/);
+  });
+
+  test("renderEditor 应急行用权威表，不留 12000/50.0 字面量", async () => {
+    const code = codeOnly(await appSrc());
+    expect(code).not.toMatch(/12000/);
+    expect(fnBody(code, "renderEditor")).toMatch(/dbOf\(/);
+  });
+
+  test("index.html 不再硬编码 thermal_zoneN（zone 序号是机器相关的，detect 可能写 zone0）", async () => {
+    const html = await htmlSrc();
+    expect(html).not.toMatch(/thermal_zone\d+/);
+  });
+
+  test("styles.css 提供 :focus-visible 焦点环（原先键盘焦点完全不可见）", async () => {
+    const { readFileSync } = await import("node:fs");
+    const css = readFileSync(new URL("../../panel/styles.css", import.meta.url), "utf8");
+    expect(css).toMatch(/:focus-visible/);
   });
 });

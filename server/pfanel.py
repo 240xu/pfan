@@ -10,6 +10,7 @@ import os
 import re
 import socketserver
 import sqlite3
+import stat
 import subprocess
 import sys as _sys
 import threading
@@ -169,11 +170,43 @@ def _result_state():
             last = line.split("RESULT", 1)[1].strip()
     return last, ts
 
+def _dev_writable():
+    """写设备前的唯一前提，语义与 core/pfand 的 dev_ok 一致：
+    生产路径（PFAN_DEV 未设）必须是【字符设备】；PFAN_DEV 是测试接缝（假设备是
+    普通文件），显式设置时只查存在性。
+    缺节点时 `open(DEV, "w")` 会把普通文件【凭空创建】出来 —— 之后 devtmpfs/insmod
+    因 EEXIST 复建不了节点，而调用方还当成写成功了（2026-10-06 事故形态，I2）。"""
+    if os.environ.get("PFAN_DEV"):
+        return os.path.exists(DEV)
+    try:
+        return stat.S_ISCHR(os.stat(DEV).st_mode)
+    except OSError:
+        return False
+
+
+def _log_dev_hazard():
+    why = "存在但不是字符设备" if os.path.exists(DEV) else "节点缺失（多为 rmmod 之后）"
+    msg = ("CRITICAL: %s %s —— 拒绝写入：open(DEV,'w') 只会造出/写进一个普通文件，"
+           "风扇档位到不了硬件，且该文件会让 devtmpfs/insmod 因 EEXIST 复建不了节点。"
+           "恢复: insmod /opt/pfanctl/pfanctl.ko（或 systemctl restart pfanctl）；"
+           "不要手工创建 %s\n" % (DEV, why, DEV))
+    try:
+        with open("/var/log/pfanel.log", "a") as fh:
+            fh.write("%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except OSError:
+        print("pfanel: %s" % msg.strip(), file=_sys.stderr, flush=True)
+
+
 def acpi(path, args=""):
     """调 pfanctl，返回**本次调用自己的** RESULT 行。
-    ① 文件锁：/dev/pfanctl 是单槽设备，pfand/pfan 也用同一把锁（见 pfand 的 flock）。
-    ② 行数增长判定：只有 RESULT 总数超过写入前的数量才算拿到新结果；
+    ① 设备守卫（I2）：不是字符设备（或节点缺失）就一行都不写 —— 否则
+       open(DEV,'w') 自己把 I6 要防的那个假节点造出来。点名危害后返回 None。
+    ② 文件锁：/dev/pfanctl 是单槽设备，pfand/pfan 也用同一把锁（见 pfand 的 flock）。
+    ③ 行数增长判定：只有 RESULT 总数超过写入前的数量才算拿到新结果；
        超时返回 None（而不是旧值），避免把 10 秒前的读数当成本次结果。"""
+    if not _dev_writable():
+        _log_dev_hazard()
+        return None
     cmd = f"{path} {args}".strip()
     lockf = os.environ.get("PFAN_LOCK", "/run/pfanel.lock")   # 与 pfand/pfan 同一把锁、同名接缝
     with open(lockf, "w") as lk:
@@ -558,10 +591,8 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send({"error":str(e)}, 500)
 
     MAX_BODY = 64 * 1024          # ② 请求体上限，防大 Content-Length 打内存
-    @staticmethod
-    def _same_origin(origin):
-        # 白名单已下沉到模块级 origin_allowed()，可用 PFAN_ORIGIN_ALLOW 配置（②⑤）
-        return origin_allowed(origin)
+    # （Minor 7）类上那个只转发到 origin_allowed() 的静态助手已删除：零调用点，
+    # 只被测试注释提及 —— 留着会被误当成"Origin 还有第二道门"。门只有一个：下面 do_POST。
 
     def _deny(self, msg, code=403):
         try:

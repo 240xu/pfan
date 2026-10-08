@@ -35,3 +35,5 @@ tr.hi td{color:#3fb950}
 .tag.g{background:#1a3d26;color:#3fb950}
 .hint{color:#8b949e;font-size:12px;margin-top:8px;line-height:1.7}
 code{background:#21262d;padding:1px 5px;border-radius:3px;font-size:12px}
+/*键盘可达性：原先没有任何 :focus 样式，Tab 走一圈完全看不到焦点在哪 */
+button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}

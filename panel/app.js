@@ -6,7 +6,9 @@ const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
 const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
 // 0 已移除：实测 _FSL 0 在 s0i3 下 = 风扇停转（2026-10-06），不允许从 UI 停扇
 const LV=[25,30,40,50,60,70,80,85,90,95,100];
-let ch1,ch2,cur=25,lastLvl=null;
+// curLevel 必须【声明】：模块永远是严格模式，`curLevel=d.level` 这种未声明赋值
+// 会直接抛 ReferenceError（实测），paint() 会在第 2 行就死 —— 面板永不刷新。
+let ch1,ch2,cur=25,lastLvl=null,curLevel=null;
 
 async function j(u,o){
   o=o||{};
@@ -50,7 +52,7 @@ function paint(d){
   document.getElementById("c-temp-bar").style.width=Math.min(100,(d.temp||0)/1.0)+"%";
   document.getElementById("c-temp-bar").style.background=d.temp>78?"#f85149":d.temp>65?"#d29922":"#1f6feb";
   document.getElementById("c-lvl").innerHTML=(d.level==null?"--":d.level)+'<span class="u">%</span>';
-  document.getElementById("c-lvl-bar").style.width=(d.level||0)+"%";
+  document.getElementById("c-lvl-bar").style.width=Math.min(100,Number(d.level)||0)+"%";
   document.getElementById("c-ec").innerHTML=(d.ec76==null?"--":d.ec76)+'<span class="u">%</span>';
   document.getElementById("c-rpm").innerHTML=(d.rpm==null?"--":d.rpm)+'<span class="u">rpm</span>';
   const ecd=document.getElementById("c-ec");
@@ -58,8 +60,13 @@ function paint(d){
   document.getElementById("c-ec-note").textContent =
     d.ec76==null?"EC 未响应":(d.ec76>d.level+5?"固件自行加速降温":"与设定一致");
   document.getElementById("c-rpm-note").textContent = d.fps?
-    ("官方表 "+d.fps[0]+"rpm / "+d.fps[1]+"mdB"):"—";
+    // fps[1] 是 noise_mdB：直接拼会显示 "35000mdB"，用户要的是 35.0dB
+    ("官方表 "+d.fps[0]+"rpm / "+(d.fps[1]/1000).toFixed(1)+"dB"):"—";
   LV.forEach(v=>{const b=document.getElementById("lv"+v);if(b)b.classList.toggle("on",v===d.level)});
+  // 曲线表的「◀ 现在」高亮跟着 8s 轮询走：renderCurve 的全量刷新间隔是 180s，
+  // 中间档位变了表却不动（"视图永不刷新"）。这里只重渲染纯函数产出的 tbody。
+  const ct=document.querySelector('#cvtbl tbody');
+  if(ct&&window.CURVE&&window.CURVE.bands) ct.innerHTML=curveRowsHtml(window.CURVE.bands,d.level);
   // 模式横幅
   const st=document.getElementById("m-st"), tx=document.getElementById("m-tx");
   if(d.curve==="s0i3"){
@@ -109,7 +116,9 @@ function paint(d){
       '<br>用上面的档位按钮直接挑，看门狗在此模式下<b>不接管</b>，温控责任在你。'+
       '<br>想回到自动曲线，点「交还 pfand 守护」（s0i3 按钮）。';
   } else if(cv!=="auto"){
-    note.innerHTML='<b style="color:#d29922">当前 '+cv+' 曲线生效中</b> —— 已释放设定值(_FSL=0)并停守护，'+
+    // cv 来自 API 的字符串字段 → 进 innerHTML 前必须 esc()（服务端今天会白名单，
+    // 但 panel 是无鉴权读端点，不能把 XSS 缝赌在"服务端恰好没写错"上）
+    note.innerHTML='<b style="color:#d29922">当前 '+esc(cv)+' 曲线生效中</b> —— 已释放设定值(_FSL=0)并停守护，'+
       'EC 完全按固件曲线走。<br>⚠️ 社区实测 quiet 会把温度拉到 ~74°C 且周期性震荡。'+
       '<span class="tag" style="background:#5a1d1d;color:#f85149">看门狗 '+GUARD_TEMP+'°C 自动回退</span>';
   } else {
@@ -121,6 +130,7 @@ function paint(d){
 
 function buildLv(){
   const box=document.getElementById("levels");
+  if(!box) return;   // DOM 结构被改动时宁可没有按钮，也不能让 boot 在 try 之前就死
   LV.forEach(v=>{const b=document.createElement("button");
     b.id="lv"+v;b.textContent=v;b.onclick=()=>setLvl(v);box.appendChild(b)});
 }
@@ -252,12 +262,14 @@ async function renderCurve(cv){
     } else if(cv2==="quiet"){
       note.innerHTML='<b style="color:#d29922">quiet 固件曲线</b> —— 由 EC 固件自己的静音曲线接管，'+
         'pfand 守护已停。⚠️ 社区实测会拉到 ~74°C 且震荡。看门狗 '+
-        '<span class="tag" style="background:#5a1d1d;color:#f85149">'+ (window.GUARD_TEMP||82) +'°C 自动回退</span>';
+        // GUARD_TEMP 是模块变量（boot 从 /api/profile 写入）。window.GUARD_TEMP 从未被赋值，
+        // 旧写法恒读到 82 —— 运维改过 guard_temp 面板也不跟。
+        '<span class="tag" style="background:#5a1d1d;color:#f85149">'+ GUARD_TEMP +'°C 自动回退</span>';
     } else if(cv2==="auto"){
       note.innerHTML='当前由 <b>固件曲线</b>接管（固件会按自己的温度曲线自行提速，'+
         '外部设定值可能被顶到 58~73%）。要精确控制请切 s0i3。';
     } else {
-      note.innerHTML='<b>'+cv2+'</b>';
+      note.innerHTML='<b>'+esc(cv2)+'</b>';   // API 字符串 → esc()
     }
   }
   drawScatter();
@@ -300,15 +312,17 @@ async function drawScatter(){
         {label:'设定曲线（阶梯）',data:ideal,type:'line',borderColor:'#3fb550',
          backgroundColor:'transparent',borderWidth:2,borderDash:[5,4],
          pointRadius:0,showLine:true}]},
+      // 结构：plugins 与 scales 是 options 的【兄弟】。旧版把 scales 写进了 plugins，
+      // Chart.js 会忽略 options.plugins.scales —— 轴标题/35..105 的范围全部不生效。
       options:{responsive:true,maintainAspectRatio:false,
         plugins:{legend:{labels:{color:'#8b949e',boxWidth:12}},
           tooltip:{callbacks:{label:c=>c.datasetIndex===1
             ?`曲线 ≤${c.parsed.x}°C → ${c.parsed.y}%`
-            :`实测 ${c.parsed.x}°C → ${c.parsed.y}%`}},
+            :`实测 ${c.parsed.x}°C → ${c.parsed.y}%`}}},
         scales:{x:{title:{display:true,text:'CPU 温度 °C',color:'#8b949e'},
             ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:35,max:105},
           y:{title:{display:true,text:'风扇档位 %',color:'#8b949e'},
-            ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:0,max:105}}}}});
+            ticks:{color:'#8b949e'},grid:{color:'#21262d'},min:0,max:105}}}});
   }catch(e){ setConn("刷新散点图失败: "+why(e)); }
 }
 
@@ -319,8 +333,8 @@ async function renderEvents(){
     const col={curve:'#58a6ff',mode:'#d29922',guard:'#f85149'};
     document.querySelector('#ev tbody').innerHTML = e.length ? e.map(x=>
       `<tr><td class="mono">${new Date(x.ts*1000).toLocaleString('zh-CN',{hour12:false})}</td>
-       <td style="color:${col[x.kind]||'#8b949e'}">${kind[x.kind]||x.kind}</td>
-       <td>${x.msg}</td></tr>`).join('')
+       <td style="color:${col[x.kind]||'#8b949e'}">${esc(kind[x.kind]||x.kind)}</td>
+       <td>${esc(x.msg)}</td></tr>`).join('')
       : '<tr><td colspan=3 style="color:#8b949e">暂无事件</td></tr>';
   }catch(e){ setConn("刷新事件流失败: "+why(e)); }
 }
@@ -371,7 +385,8 @@ function renderEditor(){
   rows.push(`<tr style="background:#2d1214">
     <td><input type="number" id="e_EMERG" value="${p.EMERG}" min="60" max="105" style="width:70px"></td>
     <td><input type="number" id="e_E" value="${p.E}" min="0" max="120" style="width:70px"></td>
-    <td class="mono">12000</td><td class="mono">50.0</td></tr>`);
+    <td class="mono">${rpmOf(parseInt(p.E,10),window.FPS) ?? '—'}</td>
+    <td class="mono">${dbOf(parseInt(p.E,10),window.FPS) ?? '—'}</td></tr>`);
   document.querySelector('#edt tbody').innerHTML=rows.join('');
 
   // 高级参数表
@@ -401,6 +416,12 @@ function preview(){
 async function saveParams(){
   try{
     const o=readEditor();
+    // 发送前本地拦两类注定失败的输入：空/非数字（parseInt→NaN→JSON null→服务端 500）
+    // 与温度乱序（复用 preview 同一条 checkTempOrder，免得发一个必然 400 的请求）
+    const nan=Object.keys(o).find(k=>!Number.isFinite(o[k]));
+    if(nan){ msg('✗ '+nan+' 必须是整数（不能为空或非数字）','#f85149'); return; }
+    const orderErr=checkTempOrder([o.IDLE,o.T1,o.T2,o.T3,o.T4,o.T5,o.EMERG]);
+    if(orderErr){ msg('✗ '+orderErr,'#f85149'); return; }
     msg('保存中…','#8b949e');
     const r=await j(API+"/api/params",{method:'POST',
       headers:{"Content-Type":"application/json"},body:JSON.stringify({params:o})});
@@ -419,23 +440,27 @@ async function saveParams(){
 
 async function boot(){
   buildLv();
-  // ⑰ 任一初始化请求失败都【不能】让 boot 整个死掉 —— 那样面板会一直空白，
-  // 而且轮询根本没启动，连"重连"的机会都没有。
+  // ⑰/U3 每个初始化请求【各自】兜底：旧版四个请求共用一个 try，
+  // /api/levels 一失败就连带跳过 mode/profile/curve —— window.CURVE 永远是 undefined，
+  // 曲线表、散点图、参数摘要从此再也不会渲染，且没有任何报错指向真正的原因。
   try{
     const lv=await j(API+"/api/levels");
     window.FPS = lv.fps;   // 权威 _FPS 表，band 渲染的 rpmOf/dbOf 用它
-    document.querySelector("#fps tbody").innerHTML=Object.entries(lv.fps).map(([k,v])=>
-      `<tr><td>${k}%</td><td class="mono">${v[0]}</td><td class="mono">${v[1]}</td>
+    document.querySelector("#fps tbody").innerHTML=Object.entries(lv.fps||{}).map(([k,v])=>
+      `<tr><td>${k}%</td><td class="mono">${v[0]}</td><td class="mono">${(v[1]/1000).toFixed(1)}</td>
        <td class="mono">${(v[2]/1000).toFixed(2)}</td></tr>`).join("");
-    MODE=(await j(API+"/api/mode")).mode;
+  }catch(e){ setConn("档位表加载失败: "+why(e)); }
+  try{ MODE=(await j(API+"/api/mode")).mode; }
+  catch(e){ setConn("运行模式读取失败: "+why(e)); }
+  try{
     const pf=await j(API+"/api/profile");
     GUARD_TEMP=pf.guard_temp||82;
+  }catch(e){ setConn("看门狗参数读取失败: "+why(e)); }
+  try{
     window.CURVE=await j(API+"/api/curve");
     applyIV(window.CURVE&&window.CURVE.params&&window.CURVE.params.IV);   // M3: 阈值随 IV
-    renderCurve(window.CURVE||{params:{},bands:[]});
-  }catch(e){
-    setConn(e&&e.message||String(e));
-  }
+  }catch(e){ setConn("曲线加载失败: "+why(e)); }
+  renderCurve(window.CURVE||{params:{},bands:[]});   // 即便 curve 拉取失败也把散点图/表格拉起来
   await pollNow();
   renderEvents();
   refreshHist();
@@ -445,4 +470,9 @@ async function boot(){
   setInterval(()=>renderEvents(),30000);
   setInterval(()=>{if(window.CURVE)renderCurve(window.CURVE);},180000);
 }
-boot();
+// 内联 onclick 走全局作用域，而模块顶层函数【不是】window 的属性 ——
+// 不显式挂出去，index.html 里 setHold/setCurve/openEditor 等按钮点了全都没反应。
+window.setHold=setHold;   window.setAuto=setAuto;    window.setCurve=setCurve;
+window.openEditor=openEditor; window.saveParams=saveParams;
+window.closeEditor=closeEditor; window.resetParams=resetParams;
+boot().catch(e=>setConn(why(e)));   // 尾段若有异常也必须落到状态条，不能是未捕获 rejection

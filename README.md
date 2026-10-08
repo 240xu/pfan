@@ -11,21 +11,64 @@ Status: under construction (P0).
 - `core/pfan` — CLI
 - `server/pfanel.py` — HTTP API + collector + watchdog
 - `panel/` — control panel (static, no bundler)
-- `systemd/`, `config/` — units and curve parameters
-- `scripts/` — CI and live smoke
+- `systemd/`, `config/`, `platform/` — units, curve parameters, platform config
+- `deploy/` — files shipped by deploy (logrotate config)
+- `scripts/` — ci / deploy / live smoke / hooks installer
 - `tests/` — python / js / shell suites
+- `docs/` — operations manual + design spec
 
 ## Setup
 
 ```bash
-npm i -D vitest              # 前端测试
-./scripts/install-hooks.sh   # 装 pre-push 钩子（.git/hooks 不受版本控制）
+npm install                      # devDependencies（vitest），按 package-lock.json 安装
+bash scripts/install-hooks.sh    # 装 pre-push 钩子（.git/hooks 不受版本控制，clone 后需手动装一次）
 ```
 
-本机约定：Termux 没有 `/usr/bin/env`，仓库脚本一律用 `bash scripts/<name>.sh` 调用。
+本机约定：Termux 没有 `/usr/bin/env`，仓库脚本一律用 `bash scripts/<name>.sh` 调用；
+写成 `./scripts/xxx.sh` 会 rc=126（`/usr/bin/env: bad interpreter`）。
 
 ## Checks
 
-- `bash scripts/ci.sh` — 静态检查 + 测试（只在开发机跑）
-- `bash scripts/smoke.sh` — 实机只读冒烟（服务态 / API 形状 / 曲线参数一致 / 公网入口 / 无硬编码密钥）
-- `pre-push` 钩子串联两者；机器不可达时只跑 ci，smoke 不 skip 只 FAIL
+- `bash scripts/ci.sh` — 静态检查 + 全部测试（只在开发机跑）
+- `npm test` — 同上，`scripts/ci.sh` 的别名（两者 rc 相同）
+- `bash scripts/smoke.sh` — 实机只读冒烟（服务态 / API 形状 / 曲线参数一致 /
+  部署面板与仓库一致 / 公网入口 / 无硬编码密钥 / `/dev/pfanctl` 节点形状）
+
+`pre-push` 钩子（`hooks/pre-push`，POSIX sh）串联两者，两种情形必须分开说：
+
+- 机器**可达**时：ci 与 smoke 都必须通过，否则拒绝 push；
+- 机器**不可达**时：ci 照常跑完，随后钩子在可达性探测那行因 `set -e`
+  直接以非 0 退出 → **push 被拒绝**，smoke 不执行（已在本地 git 仓库实测：
+  钩子内「打印跳过原因 / `PFAN_SKIP_SMOKE=1` 放行」的分支在该路径上不可达，
+  设 flag 也放不了行 —— `hooks/pre-push` 的已知缺陷，需其负责人修）。
+
+而 `bash scripts/smoke.sh` 自身**从不跳过**：第 0 段 SSH 探测失败直接 `exit 1`
+（`scripts/smoke.sh` 的可达性检查）。
+
+## Deploy
+
+前置：`~/.ssh/pfan_deploy_key` 密钥可用、目标机可达（别名见 `~/.ssh/config`）。
+
+```bash
+bash scripts/deploy.sh
+```
+
+脚本顺序（不得手拆子步骤）：本地 `ci.sh` → 目标机建恢复点
+`/root/backups/pfan-deploy-<时间戳>/` 并暂存新文件 → 传输安装（平台配置**只在缺失时**
+写入；运行单元 / 加载器 / logrotate / 面板 4 文件）→ 重启 `pfanel`、`pfand` →
+等待控制回路接管（最多 30s）→ 实机 `bash scripts/smoke.sh`。
+回滚点路径打印在脚本结尾。
+
+> ⚠️ 已知缺陷：`deploy.sh` 的暂存目录里 `core/pfan` 与 `deploy/logrotate.d/pfan`
+> 同名相撞，安装后 `/usr/local/bin/pfan` 可能变成 logrotate 配置。执行前先读
+> `docs/OPERATIONS.md` 的「部署与回滚」一节。
+
+**回滚**：把恢复点里的文件拷回原位 + `systemctl restart pfanel pfand`
+（**不要**顺手重启 `pfanctl` —— deploy 不动内核模块，见「服务」一节的覆盖边界），
+逐步骤见 `docs/OPERATIONS.md`（该流程由 `deploy.sh` 的备份清单推导，**未经目标机实操验证**）。
+
+## Docs
+
+- 操作手册（部署 / 回滚 / 内核模块重建 / 日志 / 故障处置）：`docs/OPERATIONS.md`
+- 安全模型与已知取舍：`SECURITY.md`
+- 设计与裁决（含 P0/P1/P2 复审附录 A/B/C）：`docs/specs/2026-10-06-pfan-design.md`

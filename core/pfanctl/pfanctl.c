@@ -8,6 +8,7 @@
 #include <linux/uaccess.h>
 #include <linux/miscdevice.h>
 #include <linux/acpi.h>
+#include <linux/ctype.h>	/* isxdigit：M11 的 base-0 前置条件 */
 
 static int dump_obj(union acpi_object *o, char *out, int maxlen, int level)
 {
@@ -63,7 +64,14 @@ static long pfan_parse(const char *s, char **endp)
 	 * 档位与 EC 参数都是非负数，负号没有合法用途。 */
 	if (!s || s[0] < '0' || s[0] > '9')
 		return -EINVAL;
-	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+	/* M11：base 0 只在 0x/0X 之后【真的有十六进制数字】时启用。
+	 * "0x" 这种空前缀若仍走 base 0，收不接受就取决于内核 simple_strtoull
+	 * 是否消费前缀后留下 *end=='\0' —— 那样本函数会把一个【空 token】当 0
+	 * 接受，与上面"坏 token 绝不静默变成 0"的承诺矛盾。退回 base 10 后
+	 * "0x" 解析出 0、end 停在 'x'，由下面的分隔符检查判 -EINVAL。
+	 * s[2] 只在 s[1] 是 x/X 时求值，不会越过 NUL。 */
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X') &&
+	    isxdigit((unsigned char)s[2]))
 		base = 0;
 	v = simple_strtol(s, &end, base);
 	if (!end || end == s)
@@ -127,13 +135,25 @@ static ssize_t pfan_write(struct file *f, const char __user *buf, size_t n, loff
 	p2 = strchr(kbuf, 0x20);
 	if (p2) { *p2 = 0; p2++;
 		err = pfan_parse(p2, NULL);
-		if (err < 0) return err;	/* -EINVAL：坏 token 绝不发进 ACPI */
+		/* M12：argc 必须落在 0..4，坏 token 也绝不发进 ACPI。
+		 * pfan_parse 返回 long —— 十进制 token 可以任意大（如 4294967296），
+		 * (int)err 截断后可能是【负数】；pfan_eval 的 `if (argc > 4) argc = 4`
+		 * 对负数不生效，arglist.count = (u32)argc 于是变成上亿，
+		 * acpi_evaluate_object 会越过 objs[4] 这个 4 元素栈数组读内存。
+		 * M13：拒绝必须留下 pr_err —— 否则操作者只看得到 "write error"。 */
+		if (err < 0 || err > 4) {
+			pr_err("pfanctl: rejected argc token \"%s\" (need decimal 0..4)\n", p2);
+			return -EINVAL;
+		}
 		argc = (int)err;
 		p3 = strchr(p2, 0x20);
 		if (p3) { *p3 = 0; p2 = p3 + 1;
 			for (i = 0; i < 4 && p2; i++) {
 				err = pfan_parse(p2, &p2);
-				if (err < 0) return err;
+				if (err < 0) {
+					pr_err("pfanctl: rejected arg token \"%s\" -> -EINVAL\n", p2);
+					return err;
+				}
 				a[i] = err;
 				if (!p2) break; p2 = strchr(p2, 0x20); if (p2) p2++; } } }
 	/* 便捷语法: "ec88 0x76" -> 展开为完整 EC88 调用 */
@@ -150,7 +170,10 @@ static ssize_t pfan_write(struct file *f, const char __user *buf, size_t n, loff
 			if (q) { *q = 0; q++;
 				while (q && na < 4) {
 					err = pfan_parse(q, &q);
-					if (err < 0) return err;
+					if (err < 0) {
+						pr_err("pfanctl: rejected ec88 arg token \"%s\" -> -EINVAL\n", q);
+						return err;
+					}
 					av[na++] = err;
 					if (!q) break;
 					q = strchr(q, 0x20);

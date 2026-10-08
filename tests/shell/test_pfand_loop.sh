@@ -157,7 +157,6 @@ startd 45
 # 等启动对齐真的写过一次（_FSL 1 60 = want_for(70)），避免注入与启动状态写入互踩
 for i in $(seq 1 40); do sleep 0.25; grep -q '_FSL 1 60' "$T/dl" 2>/dev/null && break; done
 grep -q '_FSL 1 60' "$T/dl" 2>/dev/null || ng "T9 前置：启动对齐没写出 60（后续对账断言无意义）"
-n9=$(grep -c '对账:' "$T/pfand.log" 2>/dev/null || true); n9=${n9:-0}
 d9=$(grep -c '_FSL 1 ' "$T/dl" 2>/dev/null || true); d9=${d9:-0}
 # 外部改档：面板/pfan/别的实例直接动档位 —— 假 dmesg 的档位状态就是"实际档"
 echo 99 > "$T/st"
@@ -268,6 +267,11 @@ echo "== T12: 设备写失败 —— getL 必须返回空，不拿旧档冒充�
 # chmod 000 同时废掉写与读：守护的写全部失败、fake dmesg 读不到请求。
 # 旧 fake dmesg 无条件吐新鲜 RESULT -> getL 把陈旧档位当实际值 -> 触发假对账。
 stop; sleep 1
+# Minor 15：chmod 000 的前提是【非 root】—— root 不受 000 权限约束，写与读照样成功，
+# "死设备"这个前提根本不成立，用例只会假红。root 下显式跳过并说明原因（不判红）。
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  [skip] T12: 以 root 运行 —— chmod 000 拦不住 root 的写入，死设备前提不成立（false-RED），跳过本项"
+else
 echo 70000 > "$T/temp"; echo 0 > "$T/emerg"
 startd 45
 sleep 4
@@ -309,5 +313,6 @@ else
   ng "设备恢复后守护未恢复对账（读回路径卡死）"
 fi
 stop
+fi   # end T12 non-root guard
 
 echo "test_pfand_loop: fails=$fails"; exit "$fails"

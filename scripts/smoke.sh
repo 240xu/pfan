@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/smoke.sh — 实机只读冒烟。
-# 只允许：GET / systemctl show|is-active|is-enabled / cat / grep / stat / ufw status /
-#         pfan get（写进设备的只有 _FST 查询，是 getter，不改风扇档位）。
+# 只允许：GET / systemctl show|is-active|is-enabled / cat / grep / stat / sha256sum /
+#         ufw status / pfan get（写进设备的只有 _FST 查询，是 getter，不改风扇档位）。
 # 严禁任何写操作（POST、set_level、set_curve、systemctl start|stop|restart、ufw allow|delete、rm）。
 # Termux 注意：/usr/bin/env 不存在，且无 /tmp 写权限 → 用 `bash scripts/smoke.sh` 调用。
 set -uo pipefail
@@ -84,12 +84,15 @@ fi
 
 printf '\n=== 3. 公网入口 ===\n'
 code=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://pfan.example.com/pfan 2>/dev/null || echo 000)
+# 失败路径可能得到 "000\n000" 之类的多行串，直接进数值比较会以看不懂的方式全挂 —— 只取 3 位状态码
+code=${code:0:3}
 if [ "$code" = 200 ]; then ok "pfan.example.com/pfan = 200"; else bad "公网入口 = $code"; fi
 
 printf '\n=== 3b. 静态路由（拆分后的面板资源）===\n'
 for u in /pfan.css /pfan.js /pfan-core.js; do
   c=$(timeout 20 curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "$API$u" 2>/dev/null || echo 000)
-  if [ "$c" = 200 ]; then ok "$u = 200"; else bad "$u = ${c:0:3}（未部署？pfanel 仍是旧版）"; fi
+  c=${c:0:3}
+  if [ "$c" = 200 ]; then ok "$u = 200"; else bad "$u = $c（未部署？pfanel 仍是旧版）"; fi
 done
 # Content-Type 必须正确，否则浏览器按 HTML 解析 JS/CSS 导致面板白屏
 ct=$(timeout 20 curl -sS -o /dev/null -w '%{content_type}' --max-time 12 "$API/pfan.css" 2>/dev/null || echo "")
@@ -110,16 +113,43 @@ else
   bad "读目标机 /etc/pfand.conf 失败"
 fi
 
-printf '\n=== 5. 面板无硬编码密钥 ===\n'
-# 拆分后 Token 占位符在 app.js（服务端 /pfan.js 注入），HTML 里不应有明文
-if grep -q '__PFAN_TOKEN__' panel/app.js; then
-  if grep -qE 'sk-[A-Za-z0-9]{20,}|Bearer [A-Za-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' panel/app.js panel/index.html; then
-    bad "面板疑似含真实密钥/UUID"
+printf '\n=== 5. 面板部署件与仓库一致，且无硬编码密钥 ===\n'
+# 线上真正被服务的是 /opt/beszel/beszel_data/（server/pfanel.py 的 PANEL_DIR：
+# /pfan→index.html, /pfan.css→styles.css, /pfan.js→app.js, /pfan-core.js→core.js），
+# 不是仓库里的 panel/ 副本。只扫仓库副本会在两边字节已经分叉时假绿 ——
+# 必须比对【实际部署件】的 sha256。全程只读：sha256sum / grep。
+for f in index.html styles.css app.js core.js; do
+  LH=$(sha256sum "panel/$f" 2>/dev/null | awk '{print $1}')
+  if [ -z "$LH" ]; then bad "仓库缺 panel/$f"; continue; fi
+  RH=$(remote "sha256sum /opt/beszel/beszel_data/$f" 2>/dev/null | awk '{print $1}')
+  [ -n "$RH" ] || RH=$(remote "sudo -n sha256sum /opt/beszel/beszel_data/$f" 2>/dev/null | awk '{print $1}')
+  if [ -z "$RH" ]; then
+    bad "部署件读不到: /opt/beszel/beszel_data/$f（未部署？）"
+  elif [ "$LH" = "$RH" ]; then
+    ok "部署件 $f 与仓库一致 ($LH)"
   else
-    ok "panel/app.js 只含 __PFAN_TOKEN__ 占位符"
+    bad "部署件 $f 已漂移: repo=$LH live=$RH（跑 bash scripts/deploy.sh 同步，勿只改一边）"
+  fi
+done
+
+# 密钥扫描两边都做：仓库副本是开源泄露面，部署件是线上实际字节。
+# 拆分后 Token 占位符在 app.js（服务端 /pfan.js 注入），HTML 里不应有明文。
+SECRET_RE='sk-[A-Za-z0-9]{20,}|Bearer [A-Za-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+if ! grep -q '__PFAN_TOKEN__' panel/app.js; then
+  bad "仓库 panel/app.js 缺 __PFAN_TOKEN__ 占位符"
+elif grep -qE "$SECRET_RE" panel/app.js panel/index.html; then
+  bad "仓库面板疑似含真实密钥/UUID"
+else
+  ok "仓库面板只含 __PFAN_TOKEN__ 占位符"
+fi
+if remote "grep -q '__PFAN_TOKEN__' /opt/beszel/beszel_data/app.js"; then
+  if remote "grep -qE '$SECRET_RE' /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/index.html"; then
+    bad "部署件疑似含真实密钥/UUID"
+  else
+    ok "部署件 app.js 只含 __PFAN_TOKEN__ 占位符"
   fi
 else
-  bad "panel/app.js 缺 __PFAN_TOKEN__ 占位符"
+  bad "部署件 app.js 缺 __PFAN_TOKEN__ 占位符（线上注入不到 Token？）"
 fi
 
 printf '\n=== 6. 平台配置（事故根因那份文件，必须存在且完整）===\n'

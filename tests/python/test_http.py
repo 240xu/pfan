@@ -4,8 +4,8 @@
 """
 import json
 import os
-import socket
 import threading
+import time
 import urllib.request
 from urllib.error import HTTPError
 
@@ -270,6 +270,60 @@ def test_write_requires_token_even_from_allowed_origin():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_tokenless_post_has_no_server_side_effect():
+    """C1：deny 之后必须真的 return —— 403 已经发出去了，代码若继续往下跑，
+    set_level 会把档位写进设备（urllib 收到 403 就返回，HTTP 层完全看不见）。
+    状态码永远是绿的，只有设备侧流水（PFAN_DMESG_LOG）与设备文件能作证。"""
+    srv, port = _serve()
+    log = os.environ["PFAN_DMESG_LOG"]
+    dev = os.environ["PFAN_DEV"]
+    try:
+        # 1) 先做一次合法写入：流水非空，才有"长没长"的基准（审计要求的前置）
+        assert _post(port, token=pfanel.get_token(), level=50) == 200
+        n0 = os.path.getsize(log) if os.path.exists(log) else 0
+        assert n0 > 0, "合法写入后假设备流水仍为空 —— 基准不成立，本用例无意义"
+        with open(dev, encoding="utf-8") as fh:
+            d0 = fh.read()
+        # 2) 无 token 的等价请求必须 403
+        assert _post(port, token=None, level=45) == 403
+        # 3) 给违规实现足够时间把副作用做完：1.5s >> 实际写入路径的几十毫秒。
+        #    任何一次流水增长都说明 403 之后代码仍在执行（deny 没 return）。
+        for _ in range(30):
+            time.sleep(0.05)
+            n1 = os.path.getsize(log)
+            if n1 != n0:
+                raise AssertionError(
+                    "403 之后服务端仍有副作用：假设备流水 %d -> %d 字节"
+                    "（token deny 缺 return，代码跑到了 set_level）" % (n0, n1)
+                )
+        with open(dev, encoding="utf-8") as fh:
+            d1 = fh.read()
+        assert d1 == d0, "403 之后设备文件被改写: %r -> %r" % (d0, d1)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_acpi_refuses_to_create_missing_node():
+    """I2：节点缺失时 acpi() 必须一行都不写 —— open(DEV,"w") 会把普通文件
+    【凭空创建】出来，之后 devtmpfs/insmod 因 EEXIST 复建不了节点，
+    而调用方还当成写成功了（2026-10-06 事故形态）。"""
+    target = os.path.join(_STATE, "missing-dev-node")
+    if os.path.exists(target):
+        os.unlink(target)
+    saved_dev = pfanel.DEV
+    had = os.environ.pop("PFAN_DEV", None)   # 摘掉测试接缝 → 走生产判定（必须是字符设备）
+    pfanel.DEV = target
+    try:
+        assert pfanel.acpi("_SB.PCI0.LPCB.EC0.TFN1._FST") is None, \
+            "缺节点时应拒绝并返回 None，而不是继续写"
+        assert not os.path.exists(target), "acpi 凭空创建了普通文件: %s" % target
+    finally:
+        pfanel.DEV = saved_dev
+        if had is not None:
+            os.environ["PFAN_DEV"] = had
 
 
 def test_write_with_valid_token_is_accepted():
