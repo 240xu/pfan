@@ -131,5 +131,17 @@ else
   ng "pre-push 未接住 ssh 退出码 —— 不可达时原因不打印、PFAN_SKIP_SMOKE 无效"
 fi
 
+sec "T9: smoke 必须比对内核模块源码（deploy.sh 不同步 /opt/pfanctl，别处无人看管）"
+if grep -qF 'core/pfanctl/pfanctl.c' scripts/smoke.sh && grep -qF '/opt/pfanctl/pfanctl.c' scripts/smoke.sh; then
+  ok "smoke.sh 会比对仓库与目标机的 pfanctl.c"
+else
+  ng "smoke.sh 不比对 pfanctl.c —— 源码漂移后仓库就不再描述在跑的内核模块"
+fi
+if grep -q 'pfanctl.ko' scripts/smoke.sh && grep -qE 'stale|比 pfanctl.c 旧' scripts/smoke.sh; then
+  ok "smoke.sh 会检测 .ko 编译过期（源码改了没重建）"
+else
+  ng "smoke.sh 不检测 .ko 是否过期 —— 改了源码却没重建时无人报警"
+fi
+
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"

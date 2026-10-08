@@ -220,5 +220,30 @@ else
   bad "pfan get 失败: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
 fi
 
+printf '\n=== 9. 内核模块源码与仓库一致（deploy.sh 不同步 /opt/pfanctl）===\n'
+# deploy.sh 的传输清单里没有 pfanctl.c/Makefile（文档里那条 [未验证] 的缺口），
+# 所以 /opt/pfanctl 以机器为准 —— 源码一旦漂移，仓库就不再描述真正在跑的内核模块，
+# 而这种漂移没有任何别的检查能发现（.ko 是编译产物、内核里的实例无从比对）。
+# 只读：两处 sha256sum。注意这只证明【磁盘源码一致】，不代表现役 .ko 是用它编的 ——
+# 那一条由下面的 mtime 兜底（.c 比 .ko 新 = 编译过期，需要人工重建）。
+REPO_C=$(sha256sum core/pfanctl/pfanctl.c 2>/dev/null | awk '{print $1}')
+TGT_C=$(remote 'sudo -n sha256sum /opt/pfanctl/pfanctl.c 2>/dev/null' | awk '{print $1}')
+if [ -z "$REPO_C" ]; then
+  bad "仓库缺 core/pfanctl/pfanctl.c"
+elif [ -z "$TGT_C" ]; then
+  bad "目标机 /opt/pfanctl/pfanctl.c 读不到（未部署？sudo 不可用？）"
+elif [ "$REPO_C" != "$TGT_C" ]; then
+  bad "内核模块源码漂移: repo=$REPO_C target=$TGT_C（仓库不再描述在跑的模块；按 docs/OPERATIONS.md 同步后重建）"
+else
+  ok "pfanctl.c 与仓库一致 ($REPO_C)"
+fi
+# .ko 是否比 .c 旧：旧了就是"源码改过但没重新编译"，现役模块仍是旧行为。
+mt=$(remote 'a=$(stat -c %Y /opt/pfanctl/pfanctl.c 2>/dev/null); b=$(stat -c %Y /opt/pfanctl/pfanctl.ko 2>/dev/null); [ -n "$a" ] && [ -n "$b" ] && { [ "$b" -ge "$a" ] && echo fresh || echo stale; }' 2>/dev/null)
+case "$mt" in
+  fresh) ok ".ko 不早于源码（编译未过期）" ;;
+  stale) bad "/opt/pfanctl/pfanctl.ko 比 pfanctl.c 旧 —— 源码改了但没重建，现役模块仍是旧行为（按 docs/OPERATIONS.md 重建并重载）" ;;
+  *)     bad "无法判断 .ko/.c 时间关系（读不到？）" ;;
+esac
+
 printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"
 exit "$rc"

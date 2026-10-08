@@ -155,8 +155,18 @@ cd /opt/pfanctl
 sudo make -C /lib/modules/$(uname -r)/build M=/opt/pfanctl modules
 ```
 
-> **[未验证]** `deploy.sh` **不同步** `/opt/pfanctl`（传输清单里没有 `pfanctl.c`/`Makefile`），
-> 所以目标机 `/opt/pfanctl` 的内容以机器为准，是否与仓库 `core/pfanctl/` 一致需现场核对。
+> `deploy.sh` **不同步** `/opt/pfanctl`（传输清单里没有 `pfanctl.c`/`Makefile`），
+> 所以目标机 `/opt/pfanctl` 以机器为准 —— **这条不再是"需现场核对"，`smoke.sh` §9 每次
+> 都会比对**：（a）仓库与目标机 `pfanctl.c` 的 sha256，（b）`.ko` 是否早于 `.c`
+> （早于 = 源码改过但没重新编译，现役模块仍是旧行为）。两项任一不符即报红，
+> 守卫见 `tests/shell/test_repo_hygiene.sh` T9。
+>
+> 同步源码但**不**自动重建（重建涉及 rmmod 窗口，必须人来决定时机）：
+>
+> ```bash
+> scp -i ~/.ssh/pfan_deploy_key core/pfanctl/{pfanctl.c,Makefile} pfan@192.168.1.10:/tmp/
+> ssh ... 'sudo -n mv /tmp/pfanctl.c /tmp/Makefile /opt/pfanctl/'
+> ```
 
 **重载**（改了 `.c` 之后）：
 
@@ -186,3 +196,14 @@ test -c /dev/pfanctl && echo OK      # 必须是字符设备
 
 **回滚点**：`/root/backups/pfanctl-build-20261006-142743/{pfanctl.c,pfanctl.ko}`（重载前的原件）
 —— **[未验证]**（目标机路径）。
+
+### 重建履历
+
+| 日期 | 触发 | 结果 | 恢复点 |
+|---|---|---|---|
+| 2026-10-08 21:16 | 审计 F5/M11/M12/M13 落地后源码领先现役 `.ko`（坏 token → 静默 0 → `_FSL 0` 停转；`argc>INT_MAX` → 内核栈越界读） | 编译 2 条既有 warning（缩进/帧大小，与 10-06 同）；先编译后重载；`_FSL 1 abc` 从 `rc=0` 变 `rc=1` + dmesg `rejected arg token "abc" -> -EINVAL`；三服务恢复、对账一致、smoke §9 绿 | `/root/backups/pfanctl-rebuild-20261008-211619/` |
+
+⚠️ 现场教训：`systemctl stop pfanctl` 之后 `systemctl start pfanctl` 那一步没起来，
+靠手工 `insmod /opt/pfanctl/pfanctl.ko` 才装载成功（回滚分支当时装回了旧 `.ko`）。
+单元本身在启动时是好的（`systemctl status` 显示开机那次 ExecStart SUCCESS）——
+`start` 失败的真实原因**未查明**，下次重载前先单独复现 `systemctl start pfanctl`。
