@@ -197,6 +197,33 @@ test -c /dev/pfanctl && echo OK      # 必须是字符设备
 **回滚点**：`/root/backups/pfanctl-build-20261006-142743/{pfanctl.c,pfanctl.ko}`（重载前的原件）
 —— **[未验证]**（目标机路径）。
 
+### ⚠️ `Requires=` 级联：动 `pfanctl` 单元 = 动整个控制栈
+
+```
+pfand.service   Requires=pfanctl.service   After=pfanctl.service
+pfanel.service  Requires=pfanctl.service   After=pfanctl.service
+```
+
+`systemctl stop pfanctl` 会**连带停掉 pfand 与 pfanel**（systemd 的 `Requires` 在停止方向
+传播）。反过来 `systemctl start pfanctl` **不会**把它们拉起来 —— 于是"只是动一下 pfanctl
+单元"很容易留下一个**风扇失控但看起来一切正常**的状态：模块在、节点在、`pfanctl` active，
+而真正的闭环守护是停的。
+
+**2026-10-08 22:06 实例**：为了查一个 `start` 失败，我做了 `stop pfanctl → start pfanctl`
+的实验，并只复核了 pfanctl/模块/节点三个对象 —— pfand/pfanel 此后停了约 30 分钟，
+直到 `smoke.sh` §1 报 `active=inactive` 并由 pre-push 钩子拦下推送才发现（当时机器空闲
+47°C、风扇保持最后 40 档，无热风险；若在负载下就是真实过热）。
+
+**规程（做任何涉及 pfanctl 单元的操作后必须全量复核）**：
+
+```bash
+for s in pfanctl pfand pfanel; do systemctl is-active $s; done   # 必须三个都 active
+curl -fsS --max-time 5 http://192.168.1.10:8789/api/now | jq -c '{temp,level,mode}'
+# level>=1 且 mode=daemon 才算闭环真正在跑；只看服务状态不够
+```
+
+`smoke.sh` §1/§2 就是这个检查，**改动后不要跳过它**（这次正是它把推送拦住的）。
+
 ### 重建履历
 
 | 日期 | 触发 | 结果 | 恢复点 |
