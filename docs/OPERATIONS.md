@@ -203,7 +203,19 @@ test -c /dev/pfanctl && echo OK      # 必须是字符设备
 |---|---|---|---|
 | 2026-10-08 21:16 | 审计 F5/M11/M12/M13 落地后源码领先现役 `.ko`（坏 token → 静默 0 → `_FSL 0` 停转；`argc>INT_MAX` → 内核栈越界读） | 编译 2 条既有 warning（缩进/帧大小，与 10-06 同）；先编译后重载；`_FSL 1 abc` 从 `rc=0` 变 `rc=1` + dmesg `rejected arg token "abc" -> -EINVAL`；三服务恢复、对账一致、smoke §9 绿 | `/root/backups/pfanctl-rebuild-20261008-211619/` |
 
-⚠️ 现场教训：`systemctl stop pfanctl` 之后 `systemctl start pfanctl` 那一步没起来，
-靠手工 `insmod /opt/pfanctl/pfanctl.ko` 才装载成功（回滚分支当时装回了旧 `.ko`）。
-单元本身在启动时是好的（`systemctl status` 显示开机那次 ExecStart SUCCESS）——
-`start` 失败的真实原因**未查明**，下次重载前先单独复现 `systemctl start pfanctl`。
+⚠️ 现场教训（2026-10-08）：`systemctl stop pfanctl` → rmmod → `systemctl start pfanctl`
+那一步失败（回滚分支因此装回了旧 `.ko`，新模块最终靠手工
+`insmod /opt/pfanctl/pfanctl.ko` 才装载成功，那次 rc=0、未触发回滚）。
+
+**复现结论：单独复现不出来。** 随后做了零影响实验——模块与节点全程不动，只
+`systemctl stop pfanctl` → `start`，连做两次都是 `rc=0`、stderr 为空、模块在册、
+节点仍是字符设备。所以失败与"紧接着 rmmod"这一上下文相关，具体原因**仍未查明**。
+
+因此重载规程的落地写法固定为：`start` 失败就直接手工 `insmod`，不要停在半路 ——
+
+```bash
+sudo -n systemctl start pfanctl || sudo -n insmod /opt/pfanctl/pfanctl.ko
+stat -c '%F %a' /dev/pfanctl     # 必须是 character special file 600
+```
+
+（`insmod` 失败才回滚：`sudo -n insmod /root/backups/pfanctl-rebuild-<ts>/pfanctl.ko`）

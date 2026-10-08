@@ -73,18 +73,24 @@ else
   ok "README 无『smoke 不 skip 只 FAIL』矛盾句"
 fi
 
-sec "T4: BASELINE.sha256 要么有活消费者，要么不存在（孤立的假安全控制）"
-if [ -f BASELINE.sha256 ]; then
-  # 只认代码消费者（scripts/hooks/deploy/源码），docs/specs 里提它不算
-  cons=$(grep -rlF 'BASELINE.sha256' scripts hooks deploy core server panel systemd config platform 2>/dev/null || true)
-  if [ -n "$cons" ]; then
-    ok "BASELINE.sha256 有代码消费者: $(printf '%s' "$cons" | tr '\n' ' ')"
+sec "T4: BASELINE.* 要么有活消费者，要么不存在（孤立的假安全控制）"
+# 理由见附录 A：这类文件的唯一消费者一旦被删，它就从"门禁"退化成"看起来像门禁"——
+# 仓库可写者能同时改文件和哈希，没有信任锚；真实一致性由 smoke 对目标机的比对承担。
+# 用通配遍历实际存在的 BASELINE.* —— 硬编码文件名会漏掉新造的孤儿。
+# 必须 --exclude 本文件：注释里提到某个孤儿名，就会让它"有消费者"，测试满足自己的断言。
+for bl in BASELINE.*; do
+  [ -e "$bl" ] || continue
+  if [ -e "$bl" ]; then
+    # 除 git/文档外，是否还有脚本/源码读它
+    if grep -rqF "$bl" --exclude-dir=.git --exclude='*.md' --exclude="$(basename "$0")" . 2>/dev/null; then
+      ok "$bl 存在且有代码消费者"
+    else
+      ng "$bl 存在但除文档外无人读取 —— 孤立的假安全控制，删除或恢复消费者"
+    fi
   else
-    ng "BASELINE.sha256 存在但无任何代码消费者（verify-import.sh 已于 43da01a 删除）"
+    ok "$bl 不存在"
   fi
-else
-  ok "BASELINE.sha256 不存在（孤立文件已移除）"
-fi
+done
 
 sec "T5: smoke.sh 失败码必须先切成 3 位再比较（防 000000 污染数值比较）"
 # 断言的是【赋值后立刻切片】，不是错误文案里顺手截断（文案里已有 \${c:0:3} 但比较仍拿全串）

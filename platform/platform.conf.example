@@ -9,4 +9,7 @@ EC_ROOT=\_SB.PCI0.LPCB.EC0
 FAN_DEVICE=\_SB.PCI0.LPCB.EC0.TFN1
 THERMAL_ZONE=/sys/class/thermal/thermal_zone9/temp
 DEV=/dev/pfanctl
+# EC_CMD：本平台 EC 寄存器写入口的 ACPI 名。当前【没有行为消费者】
+# （两侧加载器与 detect 都写/查它，只为平台配置完整性与 REQUIRED 校验保留）。
+# 换机型请先跑 `pfan detect` 确认真实路径，不要手抄本文件。
 EC_CMD=0xB5

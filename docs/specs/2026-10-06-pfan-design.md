@@ -132,8 +132,8 @@ docs/ARCHITECTURE.md           模块边界与数据流  ← 尚未创建
 |---|---|---|
 | `README:22` | `./scripts/install-hooks.sh` 在 Termux 失败（`/usr/bin/env`），应写 `bash scripts/install-hooks.sh` | ✅ **已修**：Setup 改为 `bash scripts/install-hooks.sh`，本机实跑 rc=0（且顺带刷新了 `.git/hooks/pre-push` 里那份过期副本）；守卫 T3 |
 | `README:31` | "机器不可达时只跑 ci，smoke 不 skip 只 FAIL" 自相矛盾（**钩子**会 skip，smoke 本身从不 skip），应拆成两条 | ✅ **已修**：拆成「可达/不可达两种情形」+「smoke 自身从不跳过」两条；守卫 T3 钉死矛盾句不得回归 |
-| `hooks/pre-push`（核实该条时的**新发现**） | 钩子在机器不可达时于 `probe_err=$(ssh …)` 那行因 `set -e` 直接退出（rc=255），第 14–19 行「打印跳过原因 / `PFAN_SKIP_SMOKE=1` 放行」是死代码，push 照样被拒 | ⚠️ **开放**：`hooks/` 不在本轮 scope，已上报协调者。README 已改为如实描述实际行为（本地 git 仓库实测验证） |
-| `BASELINE.sha256` | `server/pfanel.py` 已过期且仓库内无说明（其唯一消费者 `verify-import.sh` 已在 43da01a 删除） | ✅ **已处置 = 删除**。理由：它是一次性导入门禁（43da01a 的提交说明已把消费者退役），复活消费者只会得到「改任何受管文件都要重算」的伪控制 —— 仓库可写者能同时改文件和哈希，没有信任锚；真实一致性由 `smoke.sh` 对**目标机**的比对（第 4 段曲线、第 5 段部署件）承担。守卫 T4：「BASELINE.sha256 要么有活消费者，要么不存在」。`BASELINE.date` 是同一门禁的时间戳，无控制语义，留待协调者决定是否同撤 |
+| `hooks/pre-push`（核实该条时的**新发现**） | 钩子在机器不可达时于 `probe_err=$(ssh …)` 那行因 `set -e` 直接退出（rc=255），第 14–19 行「打印跳过原因 / `PFAN_SKIP_SMOKE=1` 放行」是死代码，push 照样被拒 | **✅ 已修**（1b8218e）：`probe_rc=0; probe_err=$(ssh …) || probe_rc=$?` 显式接住退出码，`set -e` 不再在机器不可达时掐断钩子；守卫 `test_repo_hygiene` T8 钉住（变异验证）。README 同步改为如实描述。 |
+| `BASELINE.sha256` | `server/pfanel.py` 已过期且仓库内无说明（其唯一消费者 `verify-import.sh` 已在 43da01a 删除） | ✅ **已处置 = 删除**。理由：它是一次性导入门禁（43da01a 的提交说明已把消费者退役），复活消费者只会得到「改任何受管文件都要重算」的伪控制 —— 仓库可写者能同时改文件和哈希，没有信任锚；真实一致性由 `smoke.sh` 对**目标机**的比对（第 4 段曲线、第 5 段部署件）承担。守卫 T4：「BASELINE.sha256 要么有活消费者，要么不存在」。`BASELINE.date` 同批处理 = **也删除**（同一理由：全仓只有本文档提到它，无代码消费者；守卫 T4 已扩到 `BASELINE.*` 两个文件，孤儿不会再悄悄回来） |
 | `package.json` | `"test": "echo Error... && exit 1"` 使 `npm test` 恒失败；`"main": "index.js"` 不存在 | ✅ **已修**：`test` → `bash scripts/ci.sh`（`npm test` 作为唯一惯例入口应跑全量套件；只挂 js 套件会造出一个更弱的第二入口，把 shell/python 检查藏起来），`main` 删除，另加 `private: true` 防误发布；守卫 T1/T2，`npm test` 实跑 rc=0 |
 | `smoke.sh:63`（现 88/94 行） | 连接失败时 `$(… \|\| echo 000)` 可能得到 `000\n000` / `000000`；取 `${code:0:3}` | ✅ **已修**：两处状态码赋值后立刻切 3 位（`code=${code:0:3}`、`c=${c:0:3}`）；守卫 T5（断言的是**赋值后切片**，不是错误文案里的顺手截断） |
 | `smoke.sh` 第 5 段 | 扫的是**仓库**面板副本，而线上服务的是 `/opt/beszel/beszel_data/`（今日字节一致；应改名或加部署件哈希） | ✅ **已修**：改为对 4 个部署件（`index.html/styles.css/app.js/core.js`，即 `PANEL_DIR` 的实际内容）做 ssh `sha256sum` 与仓库副本比对，分叉即报红；密钥扫描仓库与部署件两边都做；守卫 T6。**部署件字节是否真与仓库一致需实机 smoke 才能证实 [未验证]** |
@@ -150,12 +150,12 @@ docs/ARCHITECTURE.md           模块边界与数据流  ← 尚未创建
 
 | 位置 | 问题 | 状态（2026-10-07 核实） |
 |---|---|---|
-| `panel/index.html:14` | 副标题仍写死数据源 `thermal_zone9`；移植到别的机器即错，且不在静态扫描的 3 文件集合内。应改为从 `/api/now` 渲染或直接去掉 | ⚠️ **仍开放**（行号未变，仍是 14；`panel/` 归并行代理） |
-| `core/pfanctl/pfanctl.c` ec88 便捷语法（原记 98-103） | 硬编码 EC 路径；仓库内无调用方，但属于本阶段应去机器化的模块 → 并入 ⑱ | ⚠️ **仍开放，行号漂移：现 139–145**（`"ec88"` 展开为 `\_SB.PCI0.LPCB.EC0.EC88 …`） |
-| `core/pfan` `detect --write` | 非原子写；中途崩溃会留下半截配置，下次开机 fail-close。应 temp + `mv` | ⚠️ **仍开放**（现 `core/pfan:134` 仍是 `printf '%s' "$out" > "$2"`） |
-| `EC_CMD` | 两侧加载器都要求、`detect` 也写入，但**没有任何消费者**（死键）。spec 要求它存在 → 补注释说明用途 | ⚠️ **仍开放**（`platform/platform.conf.example:12` 仍无注释；行为消费者仍只有 `server/pfan_platform.py:12` 的 `REQUIRED` 校验与 `core/pfan:131` 的写入） |
-| `panel/app.js` free 模式看门狗文案互相矛盾（原记 `:40` vs `:77`） | 代码（`GUARDED`）表明**会接管** → 文案与 `guard()` docstring 过期 | ⚠️ **仍开放，且扩大到三处**（行号漂移）：`panel/app.js:70`「看门狗 82°C 仍会强制回退保护」**与代码一致**；`panel/app.js:109`「看门狗在此模式下不接管」**矛盾**；新增第三处 `server/pfanel.py:131-132` `guard()` docstring 写「free 模式不看门狗」也**矛盾** —— 代码为准：`GUARDED = ("quiet","s0i3","free")`（`pfanel.py:129`），free 会接管。两处待改（归 `panel/`、`server/` 负责人） |
-| `server/pfanel.py` `/api/levels` | 仍返回 `free_range:[0,120]` 与 "0~120"，而 0 在别处全面禁止（既存问题，纯文案矛盾） | ⚠️ **仍开放**（现 `pfanel.py:550-551`；`set_level` 已禁 0，接口文案未跟上） |
+| `panel/index.html:14` | 副标题仍写死数据源 `thermal_zone9`；移植到别的机器即错，且不在静态扫描的 3 文件集合内。应改为从 `/api/now` 渲染或直接去掉 | **✅ 已修**（UI 代理，见 1b8218e）：副标题不再写死 `thermal_zone9`；与 `test_no_hardcode.sh` 的「thermal_zoneN 归零」口径对齐。 |
+| `core/pfanctl/pfanctl.c` ec88 便捷语法（原记 98-103，现 159–180） | 硬编码 EC 路径 `\_SB.PCI0.LPCB.EC0.EC88`；仓库内无调用方、全仓文档零引用 → ⑱ 当时未并入。**推迟（代价已核）**：删它会改 `pfanctl.c`，而 `smoke.sh` §9 要求目标机源码与仓库一致、`.ko` 不早于 `.c` —— 即**必须付一次 rmmod/insmod 窗口**，且 `test_pfanctl_source` 的「受检调用点 ≥3 处」要同步改成 ≥2。纯度收益换一次热路径窗口不划算：**并入下一次内核改动合并做**（下次重载前先改附录状态）。 | ⏸ **推迟，需内核重载窗口** |
+| `core/pfan` `detect --write` | 非原子写；中途崩溃会留下半截配置，下次开机 fail-close。应 temp + `mv` | **✅ 已修**：temp + `mv` 原子写（同目录 rename 原子），失败清理临时文件；守卫 `test_appendix_closeout` T3（变异验证：还原成直接 `printf > "$2"` 即红）。 |
+| `EC_CMD` | 两侧加载器都要求、`detect` 也写入，但**没有任何消费者**（死键）。spec 要求它存在 → 补注释说明用途 | **✅ 已修**：`platform.conf.example` 补注释，写明「当前无行为消费者，仅为配置完整性与 REQUIRED 校验保留」；守卫 T4。 |
+| `panel/app.js` free 模式看门狗文案互相矛盾（原记 `:40` vs `:77`） | 代码（`GUARDED`）表明**会接管** → 文案与 `guard()` docstring 过期 | **✅ 已修**：代码为准（`GUARDED = ("quiet","s0i3","free")`，free **会**被接管）。改掉两处过期文案 —— `panel/app.js` 的「此模式下不接管」与 `guard()` docstring 的「free 模式不看门狗」，两处都改为与 GUARDED 一致；守卫 T1。 |
+| `server/pfanel.py` `/api/levels` | 仍返回 `free_range:[0,120]` 与 "0~120"，而 0 在别处全面禁止（既存问题，纯文案矛盾） | **✅ 已修**：`free_range:[0,120]` → `[1,120]`，note 改为「固件实测 0~120，但本 API 禁 0（_FSL 0 = 停转），交回曲线用 set_curve(auto)」—— 对外契约描述 API 行为而非固件能力；守卫 T2。 |
 | 目标机 `/opt/beszel/beszel_data/pfan.html` | 拆分后遗留的旧单文件；deploy 会备份但从不删除，无任何在用消费者 | **[未验证]**（部署件在目标机）。仓库侧可核实：`deploy.sh:28` 确实只备份、全程无删除；仓库内除该备份行外无任何消费者 |
 
 **修复轮中顺手解决的（原为 Minor）**：`pfan set` 里 `$DEV` 未加引号（现 `core/pfan` 58/78/159 行

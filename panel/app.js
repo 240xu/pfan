@@ -113,7 +113,7 @@ function paint(d){
   } else if(cv==="free"){
     note.innerHTML='<b style="color:#d29922">自由模式</b> —— 曲线守护已暂停，'+
       'EC 只跟随你手动选的档位（仍在 s0i3 下，所以设定值一定生效）。'+
-      '<br>用上面的档位按钮直接挑，看门狗在此模式下<b>不接管</b>，温控责任在你。'+
+      '<br>用上面的档位按钮直接挑；看门狗仍在——超过 '+GUARD_TEMP+'°C 会自动回退到安全曲线（quiet/s0i3/free 同一套，见 server GUARDED）。'+
       '<br>想回到自动曲线，点「交还 pfand 守护」（s0i3 按钮）。';
   } else if(cv!=="auto"){
     // cv 来自 API 的字符串字段 → 进 innerHTML 前必须 esc()（服务端今天会白名单，

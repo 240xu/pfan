@@ -131,7 +131,8 @@ GUARDED = ("quiet", "s0i3", "free")
 
 def guard():
     """看门狗：受管曲线下温度失控 → 自动回退到安全自动模式。
-    free 模式不看门狗（用户明确接管，风险自担）"""
+    GUARDED 含 free —— 自由模式【同样】被接管（曾有文案说 free 不看门狗，
+    与 GUARDED 矛盾；代码为准：free 下没人管实测会拉到 ~74°C）。"""
     cv = get_curve()
     if cv not in GUARDED:
         return None
@@ -580,8 +581,11 @@ class H(http.server.BaseHTTPRequestHandler):
                 self._send({"mode": "daemon" if held == "active" else "manual"})
             elif p == "/api/levels":
                 self._send({"levels":LEVELS,"fps":FPS,
-                            "free_range":[0,120],
-                            "note":"固件支持 0~120 任意整数；档位按钮只是常用值"})
+                            # 固件实测接受 0~120，但 set_level 明令禁 0（_FSL 0 = 风扇停转，
+                            # 不是"交回曲线"）。对外契约必须描述 API 行为，不是固件能力。
+                            "free_range":[1,120],
+                            "note":"固件实测接受 0~120，但本 API 禁 0（_FSL 0 = 停转）；"
+                                   "交回曲线请 set_curve(\"auto\")。档位按钮只是常用值"})
             elif p == "/api/curve":
                 # 守护曲线
                 self._send(curve_view())
