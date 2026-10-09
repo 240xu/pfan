@@ -46,7 +46,7 @@ bash scripts/ci.sh
 
 echo "== 1/5 目标机建恢复点 + 暂存新文件 =="
 # 备份目录在 /root 下 → 必须 sudo；暂存目录必须由 pfan 拥有，否则 scp 写不进去
-$R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt/beszel/beszel_data/vendor && \
+R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt/beszel/beszel_data/vendor && \
     for f in /usr/local/bin/pfand /usr/local/bin/pfan /usr/local/bin/pfanel.py \
              /usr/local/bin/pfan_platform.py /usr/local/bin/pfan_core.py; do \
       [ -e \"\$f\" ] && sudo -n cp -a \"\$f\" '$B/'; done; \
@@ -66,28 +66,28 @@ $R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /op
 
 echo "== 2/5 传输 =="
 # 不加 || true：任何一次传输失败都必须中止，否则会拿残缺的暂存目录去安装
-$S core/pfand core/pfan core/platform.sh               "pfan@$HOST:$STAGE/"
-$S server/pfanel.py server/pfan_platform.py server/pfan_core.py "pfan@$HOST:$STAGE/"
-$S panel/index.html panel/styles.css panel/app.js panel/core.js "pfan@$HOST:$STAGE/"
-$S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$STAGE/"
+S core/pfand core/pfan core/platform.sh               "pfan@$HOST:$STAGE/"
+S server/pfanel.py server/pfan_platform.py server/pfan_core.py "pfan@$HOST:$STAGE/"
+S panel/index.html panel/styles.css panel/app.js panel/core.js "pfan@$HOST:$STAGE/"
+S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$STAGE/"
 # ⚠ 必须用独立暂存名：core/pfan 也叫 $STAGE/pfan，两份 scp 到同一路径会互相覆盖，
 # 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
 #（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
-$S deploy/logrotate.d/pfan                       "pfan@$HOST:$STAGE/logrotate-pfan"
+S deploy/logrotate.d/pfan                       "pfan@$HOST:$STAGE/logrotate-pfan"
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
 # 不执行（连 boot() 都不跑），而冒烟只比对 4 个非 vendor 文件 → 闸门全照绿
 # （专家审计 C1：看不见失败的闸门比没有闸门更危险）。
-$S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
+S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
     "pfan@$HOST:$STAGE/"
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
 # 不执行（连 boot() 都不跑），而现有冒烟只比对 4 个非 vendor 文件 → 三道闸门全照绿
 # （2026-10-08 专家审计 C1：这是比没有闸门更危险的静默失败）。
-$S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
+S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
     "pfan@$HOST:$STAGE/"
-$R "ls -la '$STAGE' | tail -n +2"
+R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
-$R "set -e
+R "set -e
     # 3a. 平台配置：仅在缺失时写入（这是机器自己的配置，不覆盖）
     if [ ! -f /etc/pfan/platform.conf ]; then
       sudo -n install -m 644 '$STAGE/platform.conf.example' /etc/pfan/platform.conf
@@ -109,10 +109,10 @@ $R "set -e
     # 先做一次语法演练 —— 配置写错了要等一个月才爆，而且那时日志已经不可控
     sudo -n logrotate -d /etc/logrotate.d/pfan >/dev/null
     echo '  /etc/logrotate.d/pfan 已安装并通过 logrotate -d 自检'
-    echo '  运行单元与加载器安装完成'" || { echo "安装失败"; $R "ls -la $STAGE"; exit 1; }
+    echo '  运行单元与加载器安装完成'" || { echo "安装失败"; R "ls -la $STAGE"; exit 1; }
 
 # 面板静态文件（独立一段，路径写死，便于失败时定位）
-$R "set -e
+R "set -e
     sudo -n install -m 644 $STAGE/index.html /opt/beszel/beszel_data/index.html
     sudo -n install -m 644 $STAGE/styles.css /opt/beszel/beszel_data/styles.css
     sudo -n install -m 755 $STAGE/app.js     /opt/beszel/beszel_data/app.js
@@ -129,7 +129,7 @@ $R "set -e
     echo '  面板 4 文件 + vendor 3 文件已安装'"
 
 echo "== 4/5 重启服务 =="
-$R "sudo -n systemctl restart pfanel && sleep 2 && sudo -n systemctl restart pfand"
+R "sudo -n systemctl restart pfanel && sleep 2 && sudo -n systemctl restart pfand"
 
 # 等待控制回路真正接管，而不是拍脑袋 sleep：
 #   - pfand 启动时 ensure_s0i3() 会短暂写 _FSL 1 0，第一轮才设真实档位
@@ -138,7 +138,7 @@ $R "sudo -n systemctl restart pfanel && sleep 2 && sudo -n systemctl restart pfa
 echo "== 4b/5 等待控制回路接管（最多 30s）=="
 ready=0
 for i in $(seq 1 30); do
-  st=$($R "systemctl is-active pfand" 2>/dev/null || echo "?")
+  st=$(R "systemctl is-active pfand" 2>/dev/null || echo "?")
   # 用 jq 而不是 sed：原始 JSON 是 `"level": 40`（冒号后有空格），
   # sed 贪婪匹配会因为这个空格永远失配（2026-10-06 实测 30s 全程误判为未接管）。
   lvl=$(timeout 12 curl -fsS --max-time 8 "$API_BASE/api/now" 2>/dev/null \
@@ -152,10 +152,10 @@ for i in $(seq 1 30); do
 done
 [ "$ready" = 1 ] || { echo "[FAIL] 30s 内控制回路未接管"; exit 1; }
 
-$R "systemctl is-active pfanel pfand"
+R "systemctl is-active pfanel pfand"
 
 echo "== 4c/5 复核日志轮转已生效 =="
-$R "sudo -n logrotate -d /etc/logrotate.d/pfan 2>&1 | grep -E 'considering log file|error' | head -3 | sed 's/^/    /'"
+R "sudo -n logrotate -d /etc/logrotate.d/pfan 2>&1 | grep -E 'considering log file|error' | head -3 | sed 's/^/    /'"
 
 echo "== 5/5 实机冒烟 =="
 bash scripts/smoke.sh
