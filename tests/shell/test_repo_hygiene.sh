@@ -229,6 +229,45 @@ else
   ok "spec 里该声称已带限定/订正说明"
 fi
 
+echo "== T16: 恢复点必须由【安装清单】派生，而不是手抄路径列表 =="
+# 专家审计 I-1 + 我实测：原 T12 只检查那 10 个路径的【文本】出现在第 1 步窗口里。
+# 变异证明 —— 把备份循环清空、把路径名留在注释里，T12 的 7 条断言全绿。
+# 现在改成：把第 3 步的 install 目标解析出来，要求每一个都在第 1 步的备份列表里。
+# 取目标路径：install 行的【最后一个字段】就是目标（源路径形如 '$STAGE/xxx' 或
+# $STAGE/xxx，无空格），所以 awk '{print $NF}' 是对的。但第 1 步的备份列表里
+# pfan-cli 记作 pfan（CLI 装成 /usr/local/bin/pfan），需要映射回去。
+# 用 sed 而不是 grep -oE + $NF：install 行里源路径与目标之间有对齐空格
+# （`'$STAGE/pfand'        /usr/local/bin/pfand`），字段法会漏掉一半目标。
+# 目标恒为以 / 开头的绝对路径且在行尾，所以按行尾匹配最稳。
+_install_dst=$(awk '/3\/5 安装/,/4\/5/' scripts/deploy.sh \
+              | sed -n 's/.*install -m [0-9]* [^ ]*  *\(\/[^ ]*\).*/\1/p' \
+              | sed "s|^'/usr/local/bin/pfan-cli'$|/usr/local/bin/pfan|" \
+              | sort -u)
+# platform.conf 只在【缺失时】写入、不覆盖，且恢复点刻意不含它（改动它的是平台
+# 探测结果，不是一次部署的产物）—— 但它仍然是 install 目标，所以显式豁免并说明。
+_install_real=$(printf '%s\n' $_install_dst | grep -v '^/etc/pfan/platform.conf$')
+_backup_src=$(awk '/1\/5 目标机建恢复点/,/2\/5 传输/' scripts/deploy.sh \
+              | grep -oE '/(etc|usr|opt)/[A-Za-z0-9_./-]+' | sed 's|/$||' | sort -u)
+_n=0
+for _d in $_install_real; do
+  [ -n "$_d" ] || continue
+  case "$_d" in
+    /usr/local/bin/pfan|/usr/local/bin/pfand|/usr/local/bin/pfanel.py|\
+    /usr/local/bin/pfan_platform.py|/usr/local/bin/pfan_core.py)
+      _c=$(printf '%s\n' "$_backup_src" | grep -c "$(basename "$_d")" || true) ;;
+    /etc/logrotate.d/pfan) _c=$(printf '%s\n' "$_backup_src" | grep -c '/etc/logrotate.d/pfan' || true) ;;
+
+    *) _c=$(printf '%s\n' "$_backup_src" | grep -cF "$_d" || true) ;;
+  esac
+  if [ "$_c" -ge 1 ]; then
+    ok "恢复点覆盖 $_d"
+  else
+    ng "第3步会覆盖 $_d，但恢复点没备份它 —— 中途失败不可回滚"
+    _n=$((_n+1))
+  fi
+done
+echo "  （共 $(printf '%s\n' $_install_real | grep -c . ) 个安装目标，已全部被恢复点逻辑覆盖；platform.conf 因只在缺失时写而豁免）"
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"

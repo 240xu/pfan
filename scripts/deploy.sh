@@ -48,7 +48,11 @@ S(){ _retry "tar|ssh $HOST" ssh "${SSHOPT[@]}" pfan@"$HOST" true \
              case "$f" in
                # deploy/logrotate.d/pfan 保留子目录（靠它与 core/pfan 区分），
                 # 其它一律扁平到 $STAGE/<basename>，因为安装段按 $STAGE/<name> 取
-               deploy/*) mkdir -p "$t/deploy/logrotate.d"
+                # ⚠ 目录必须由【文件名】推出来，不能写死 deploy/logrotate.d：
+                # 写死时 S deploy/check-recovery-point.sh 会 cp 失败（目标目录不存在），
+                # 而 deploy/ 下现在不止 logrotate 一个文件。教训同 C3：暂存区布局一旦写死，
+                # 新增文件就会静默丢失。
+                deploy/*) mkdir -p "$t/$(dirname "$f")"
                           cp "$f" "$t/$f" || { rm -rf "$t"; return 1; } ;;
                *)      cp "$f" "$t/$(basename "$f")" || { rm -rf "$t"; return 1; } ;;
              esac
@@ -84,7 +88,11 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt
                  /opt/beszel/beszel_data/vendor/uPlot.esm.js \
                  /opt/beszel/beszel_data/vendor/uPlot.min.css \
                  /opt/beszel/beszel_data/vendor/uPlot.LICENSE; do
-          [ -e "\$f" ] && sudo -n cp -a --parents "\$f" '$B/' 2>/dev/null || true; done; \
+           # ⚠ [ -e ] 必须带 sudo：面板目录 /opt/beszel/beszel_data 是 drwx------ root:root，
+           # pfan 无权穿越，于是非 sudo 的 [ -e ] 一律 false，7 个面板文件的备份被【静默跳过】，
+           # 而 || true 让它看不出错 —— 恢复点少了第 3 步要覆盖的全部面板文件（实测确认）。
+           # 这就是「把面板装在别的应用私有目录」（专家审计 m-7）的真实代价。
+           sudo -n test -e "\$f" && sudo -n cp -a --parents "\$f" '$B/' || true; done; \
     [ -d /opt/beszel/beszel_data ] && sudo -n cp -a /opt/beszel/beszel_data/pfan.html '$B/' 2>/dev/null || true; \
     echo '  备份: $B'; ls -la '$B' | tail -n +2 | sed 's/^/    /'"
 
@@ -94,6 +102,8 @@ S core/pfand core/pfan core/platform.sh
 # deploy/ 开头的路径在暂存区保留子目录（$STAGE/deploy/logrotate.d/pfan），与 $STAGE/pfan
 # 区分开 —— 否则两者同名互相覆盖，就是 C3 那个「logrotate 装成 CLI」的缺陷
 S deploy/logrotate.d/pfan
+# 恢复点核对脚本随部署传过去（deploy/ 开头的会保留子目录，见 S 的 case 分支）
+S deploy/check-recovery-point.sh
 S server/pfanel.py server/pfan_platform.py server/pfan_core.py
 S panel/index.html panel/styles.css panel/app.js panel/core.js
 S platform/platform.conf.example platform/fan-candidates.txt
@@ -110,12 +120,37 @@ R "mv -f '$STAGE/pfan' '$STAGE/pfan-cli'"
 # （专家审计 C1：看不见失败的闸门比没有闸门更危险）。
 S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
+
+# ---- 备份完整性核对（必须在传输之后：脚本本身随部署传过去）----
+# 备份循环里每条 cp 都跟 || true，磁盘满 / ACL 拒绝 / 读错误全被吞掉；部署照常覆盖
+# 7 个二进制 + 面板 + logrotate + platform.sh 并在末尾打印「回滚点: $B」—— 看着有
+# 恢复点，实际可能缺一大半（专家审计 I-1）。实测真发生过：面板目录 drwx------
+# root:root，非 sudo 的 [ -e ] 一律 false，7 个面板文件被静默跳过，无任何提示。
+# 检查逻辑放在仓库脚本里传输 —— 内联进 R "..." 会被双引号提前求值（试过：报
+# sudo: command not found + _w: unbound variable）。
+# 必须 sudo：面板目录 drwx------ root:root，非 sudo 读不到会【少算】，
+# 检查就会假通过（实测：非 sudo 报 3/3，看着齐了，其实一个面板文件都没备）。
+R "sudo -n sh '$STAGE/deploy/check-recovery-point.sh' '$B' > /tmp/pfan-rp.txt"
+R "cat /tmp/pfan-rp.txt" > "$HOME/.cache/pfan-rp.txt"
+_rpexp=$(sed -n "s/^EXPECTED //p" "$HOME/.cache/pfan-rp.txt")
+_rppre=$(sed -n "s/^PRESENT //p" "$HOME/.cache/pfan-rp.txt")
+if [ -z "$_rpexp" ] || [ -z "$_rppre" ]; then
+  echo "  [FAIL] 恢复点核对脚本没跑起来（EXPECTED/PRESENT 读不到），中止部署" >&2
+  exit 1
+fi
+echo "  恢复点已确认落地 $_rppre/$_rpexp 个关键路径"
+if [ "$_rppre" != "$_rpexp" ]; then
+  grep "^MISS " "$HOME/.cache/pfan-rp.txt" | sed "s/^/    [WARN] 恢复点缺 /"
+  echo "  [FAIL] 恢复点不完整 —— 中止部署（否则中途失败无法回滚到一致状态）" >&2
+  exit 1
+fi
 # 不执行（连 boot() 都不跑），而现有冒烟只比对 4 个非 vendor 文件 → 三道闸门全照绿
 # （2026-10-08 专家审计 C1：这是比没有闸门更危险的静默失败）。
 # 传输后【立刻】校验关键文件在位 —— 否则问题要等到 install 才暴露，且难以定位
 for _must in pfand pfan-cli pfanel.py pfan_platform.py pfan_core.py platform.sh \
              platform.conf.example fan-candidates.txt index.html styles.css app.js core.js \
-             deploy/logrotate.d/pfan uPlot.esm.js uPlot.min.css; do
+             deploy/logrotate.d/pfan deploy/check-recovery-point.sh \
+             uPlot.esm.js uPlot.min.css uPlot.LICENSE; do
   # 注意：这里【不能】写成 "test -f '$STAGE/$_must'" —— R 用 "$@" 转发，
   # 双引号里的单引号会被原样送到远端 shell，于是路径里带上引号字符、test 永远失败。
   # 路径由 mktemp 生成（仅字母数字/短横/斜杠/点），不需要引号。
@@ -124,7 +159,7 @@ for _must in pfand pfan-cli pfanel.py pfan_platform.py pfan_core.py platform.sh 
   R "ls $STAGE/$_must >/dev/null" \
     || { echo "[FAIL] 暂存区缺少 $_must —— 传输不完整，中止（不要拿残缺暂存区去安装）" >&2; exit 1; }
 done
-echo "  暂存区 16 个文件齐备"
+echo "  暂存区 17 个文件齐备"
 R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
