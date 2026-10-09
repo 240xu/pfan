@@ -47,14 +47,20 @@ S(){ _retry "tar|ssh $HOST" ssh "${SSHOPT[@]}" pfan@"$HOST" true \
            local f; for f in "$@"; do
              case "$f" in
                # deploy/logrotate.d/pfan 保留子目录（靠它与 core/pfan 区分），
-               # 其它一律扁平到 $STAGE/<basename>，因���安装段按 $STAGE/<name> 取
+                # 其它一律扁平到 $STAGE/<basename>，因为安装段按 $STAGE/<name> 取
                deploy/*) mkdir -p "$t/deploy/logrotate.d"
                           cp "$f" "$t/$f" || { rm -rf "$t"; return 1; } ;;
                *)      cp "$f" "$t/$(basename "$f")" || { rm -rf "$t"; return 1; } ;;
              esac
            done
-           tar -cf - -C "$t" . | ssh "${SSHOPT[@]}" pfan@"$HOST" "tar -xf - -C '$STAGE'"
-           local rc=$?; rm -rf "$t"; return $rc; }; }
+             # set -o pipefail：tar 管道【必须】两端都成功。此前 tar 流被截断时
+             # 退出码仍是 0（ssh 侧成功），于是一个空的 deploy/ 目录被当成传输成功，
+             # 直到 install 报 "cannot stat" 才暴露，而且看不出是哪一步丢的。
+             local rc=0
+             set -o pipefail 2>/dev/null || true
+             tar -cf - -C "$t" . | ssh "${SSHOPT[@]}" pfan@"$HOST" "mkdir -p '$STAGE' && tar -xf - -C '$STAGE'" || rc=$?
+             set +o pipefail 2>/dev/null || true
+             rm -rf "$t"; return $rc; }; }
 TS=$(date +%Y%m%d-%H%M%S)
 B="/root/backups/pfan-deploy-$TS"
 STAGE="/tmp/pfan-deploy-$$"
@@ -85,7 +91,7 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt
 echo "== 2/5 传输 =="
 # 不加 || true：任何一次传输失败都必须中止，否则会拿残缺的暂存目录去安装
 S core/pfand core/pfan core/platform.sh
-# deploy/ 开头的路径在暂存区保留子目录（$STAGE/logrotate.d/pfan），与 $STAGE/pfan
+# deploy/ 开头的路径在暂存区保留子目录（$STAGE/deploy/logrotate.d/pfan），与 $STAGE/pfan
 # 区分开 —— 否则两者同名互相覆盖，就是 C3 那个「logrotate 装成 CLI」的缺陷
 S deploy/logrotate.d/pfan
 S server/pfanel.py server/pfan_platform.py server/pfan_core.py
@@ -95,7 +101,7 @@ S platform/platform.conf.example platform/fan-candidates.txt
 # 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
 #（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
 # core/pfan 与 deploy/logrotate.d/pfan 同名：S 落盘时用【各自目录】避开冲突
-# （$STAGE/pfan 与 $STAGE/logrotate.d/pfan），这里再把 CLI 改名成 pfan-cli，
+# （$STAGE/pfan 与 $STAGE/deploy/logrotate.d/pfan），这里再把 CLI 改名成 pfan-cli，
 # 让 $STAGE/pfan 这个名字空出来给 logrotate 规则 —— 否则安装出来的是
 # logrotate 规则装成 /usr/local/bin/pfan、CLI 装成 /etc/logrotate.d/pfan（C3 原始缺陷）。
 R "mv -f '$STAGE/pfan' '$STAGE/pfan-cli'"
@@ -106,6 +112,19 @@ S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENS
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
 # 不执行（连 boot() 都不跑），而现有冒烟只比对 4 个非 vendor 文件 → 三道闸门全照绿
 # （2026-10-08 专家审计 C1：这是比没有闸门更危险的静默失败）。
+# 传输后【立刻】校验关键文件在位 —— 否则问题要等到 install 才暴露，且难以定位
+for _must in pfand pfan-cli pfanel.py pfan_platform.py pfan_core.py platform.sh \
+             platform.conf.example fan-candidates.txt index.html styles.css app.js core.js \
+             deploy/logrotate.d/pfan uPlot.esm.js uPlot.min.css; do
+  # 注意：这里【不能】写成 "test -f '$STAGE/$_must'" —— R 用 "$@" 转发，
+  # 双引号里的单引号会被原样送到远端 shell，于是路径里带上引号字符、test 永远失败。
+  # 路径由 mktemp 生成（仅字母数字/短横/斜杠/点），不需要引号。
+  # 用 ls 而不是 test -f：ssh 把整条命令交给远端 shell，test -f 在某些路径形态下
+  # 会被解析成 test 的多参数形式（-f 之后只跟一个词时最稳），ls 的失败更直白。
+  R "ls $STAGE/$_must >/dev/null" \
+    || { echo "[FAIL] 暂存区缺少 $_must —— 传输不完整，中止（不要拿残缺暂存区去安装）" >&2; exit 1; }
+done
+echo "  暂存区 16 个文件齐备"
 R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
@@ -127,7 +146,7 @@ R "set -e
     sudo -n install -m 644 '$STAGE/pfan_platform.py' /usr/local/bin/pfan_platform.py
     sudo -n install -m 644 '$STAGE/pfan_core.py'     /usr/local/bin/pfan_core.py
     # 3d. ⑭ 日志轮转：不装的话 /var/log/pfand.log 会无限长
-    sudo -n install -m 644 '$STAGE/logrotate.d/pfan' /etc/logrotate.d/pfan
+    sudo -n install -m 644 '$STAGE/deploy/logrotate.d/pfan' /etc/logrotate.d/pfan
     # 先做一次语法演练 —— 配置写错了要等一个月才爆，而且那时日志已经不可控
     sudo -n logrotate -d /etc/logrotate.d/pfan >/dev/null
     echo '  /etc/logrotate.d/pfan 已安装并通过 logrotate -d 自检'
