@@ -394,12 +394,21 @@ def apply_persisted_state():
     if st["curve"] == "auto":
         return
     try:
+        # free 与 auto 在 CURVES 里映射为 None（它们不靠 EC88 写值），不能直接 0x%02X 展开。
+        # free 的 EC 语义等同 s0i3（见 set_curve: free 分支复用 CURVES["s0i3"]）。
+        ec_val = CURVES["s0i3"] if st["curve"] == "free" else CURVES[st["curve"]]
+        # 先把 EC88 写成功，再交回控制权：反过来的话，EC88 一旦抛异常（TypeError 或设备
+        # 错误），_FSL 已经停在 0 而没有任何人恢复档位 —— pfanel 每次重启（含 deploy.sh）
+        # 都会复现，且 pfand 在非 s0i3 模式 exit 0 救不回来（专家审计 C2，实测）。
+        acpi(EC88, "4 181 0x79 0x%02X 0" % ec_val)
         acpi(FSL, "1 0")
-        acpi(EC88, "4 181 0x79 0x%02X 0" % CURVES[st["curve"]])
         if st["curve"] == "s0i3":
             # s0i3 由 pfand 施加自定义温度曲线，拉起守护（它会自己 ensure_s0i3）
             subprocess.run(["systemctl", "restart", "pfand"], capture_output=True)
         else:
+            # free 与 quiet/cool 一样是【守护停着、档位由面板直接控】，
+            # 所以同样要恢复已存档位（专家审计 C2：原来 free 落不到这里，
+            # 异常在 EC88 展开时就抛了，档位永远不恢复）。
             subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
             if st.get("level"):
                 acpi(FSL, "1 %d" % int(st["level"]))

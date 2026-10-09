@@ -2,6 +2,7 @@
 
 导入 pfanel 前必须给平台配置，否则模块级加载会按设计快速失败（P1 的 I4 修复）。
 """
+import builtins
 import json
 import os
 import threading
@@ -404,3 +405,53 @@ def test_main_instantiates_the_daemon_server():
         "__main__ 没有实例化 pfanel.Server —— daemon_threads 形同虚设"
     assert "socketserver.ThreadingTCPServer((" not in main, \
         "__main__ 用回了裸 ThreadingTCPServer（daemon_threads=False，shutdown 会挂住）"
+
+
+# ---------------- 专家审计 C2：还原持久化状态时 free 曲线不得把风扇留在 0 ----------------
+# CURVES["free"] is None  ->  "0x%02X" % None 抛 TypeError；
+# 而 FSL "1 0" 在它【之前】已经写出去了，于是异常发生在恢复档位之前：
+# pfanel 每次重启（包括 deploy.sh 都会重启 pfanel）都把 _FSL 留在 0，
+# 且 pfand 在非 s0i3 模式 exit 0，救不回来。
+def test_free_curve_must_not_break_persisted_state_restore():
+    """free 曲线是 GUI 上真实存在的选项，持久化状态里出现它是正常的。
+
+    缺陷（专家审计 C2）：apply_persisted_state 原本对 CURVES[curve] 直接 0x%02X 展开，
+    而 free 在 CURVES 里是 None —— 于是一次 pfanel 重启（deploy.sh 每次都重启它）就在
+    恢复档位【之前】抛异常，风扇被交回控制权却没有档位，pfand 在非 s0i3 模式 exit 0 救不回来。
+    这里断言的是【行为】而不是 CURVES 的内容：修复方式可以是给 free 补一个值，
+    也可以是在调用点特判，两种都该通过。
+    """
+    pfanel._APPLIED = False
+    # 本机（Termux）没有 systemd，直接调 subprocess 会在 systemctl 上 FileNotFoundError，
+    # 与被测逻辑无关。打桩掉：这里要验的是"档位有没有被恢复"，不是服务管理。
+    import subprocess as _sp
+    _real = _sp.run
+    _sp.run = lambda *a, **k: _real(["true"], capture_output=True)
+    # 同理：/var/log 在本机不存在（生产机有），日志写不出去不该算缺陷
+    _pf = os.path.join(_STATE, "pfanel.log")
+    _real_open = builtins.open
+
+    def _open2(path, *a, **k):
+        if str(path) == "/var/log/pfanel.log":
+            path = _pf
+        return _real_open(path, *a, **k)
+
+    builtins.open = _open2
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free", "level": 40}, fh)
+    dev = os.environ["PFAN_DEV"]
+    open(dev, "w").close()
+    try:
+        pfanel.apply_persisted_state()   # 抛异常本身就是缺陷
+    finally:
+        pfanel._APPLIED = False
+        _sp.run = _real
+        builtins.open = _real_open
+    writes = [l for l in open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l]
+    assert writes, "free 曲线还原时一个 _FSL 都没写 —— 异常发生在恢复档位之前"
+    import re as _re
+    final = _re.search(r"_FSL 1 (\d+)", writes[-1])
+    assert final and int(final.group(1)) == 40, (
+        "free 曲线还原后最终档位应是已存档的 40，实际=%r（0 = 停转）" % (writes[-1],)
+    )

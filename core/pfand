@@ -194,6 +194,22 @@ if [ "$_cfg_bad" = "0" ]; then
         log "配置不自洽(EMERG_REL=$EMERG_REL EMERG=$EMERG T5=$T5 L5=$L5 CAP=$CAP) -> fail-safe 满速 100% 并退出"
         _cfg_bad=1
     fi
+    # 档位下界：L0 不能低于 _FPS 表最低档（25），E/CAP/各级也不能为 0。
+    # 上面只查了"是不是数字"和三条关系，漏了下界，而下界正是【停转】：
+    #   E=0   -> setL "$E" 在最热温度写 _FSL 1 0（实测，专家审计 C1）
+    #   CAP=0 -> apply() 钳到 0，d=|0-written|=0 < DEAD，于是【不写不记日志】，
+    #            风扇停在 ensure_s0i3 握手留下的 0 上（实测，C2）
+    if [ "$E" -lt 25 ] || [ "$CAP" -lt 25 ] || [ "$L0" -lt 25 ]; then
+      log "配置档位下界非法(E=$E CAP=$CAP L0=$L0，三者都须 >= 25 = _FPS 最低档；0=风扇停转) -> fail-safe 满速 100% 并退出"
+      _cfg_bad=1
+    fi
+    for _lv in L1 L2 L3 L4 L5; do
+      eval "_v=\${$_lv}"
+      if [ "$_v" -lt 25 ]; then
+        log "配置 $_lv=$_v 低于 _FPS 最低档 25 -> fail-safe 满速 100% 并退出"
+        _cfg_bad=1
+      fi
+    done
 fi
 if [ "$_cfg_bad" = "1" ]; then
     flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9

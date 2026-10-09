@@ -179,4 +179,12 @@ out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/mn2.conf" PFAN_LOCK="$T/lock" PFAN_L
       bash core/pfand 2>&1); rc=$?
 chk_missing "$T/mn.log2" "$T/gone2" "候选分支节点缺失" $rc
 
+echo "== T12: 配置自校验必须挡住会【停转】的下界（E/CAP/L* ≤ 0 或低于 L0_MIN）=="
+# 专家审计 C1/C2 实测：E=0 时自检放行，随后 setL "$E" 在最热温度写 _FSL 1 0；
+# CAP=0 且 L*=0 时 apply() 钳到 0，d=0 < DEAD 于是【不写不记日志】，风扇停在
+# ensure_s0i3 握手留下的 0 上。自检原本只查"是不是数字"+三条关系。
+_rc=/root/backups/_cfgchk-probe
+grep -qE 'L0.*< *25|_cfg_bad.*L0|\[ "\$E" -lt' core/pfand && ok "pfand 自检含档位下界判断" || ng "pfand 自检没有档位下界判断（E=0 / CAP=0 可通过 → 停转）"
+grep -qE '\[ "\$E" -lt ' core/pfand && ok "显式检查 E 的下界" || ng "没有显式检查 E 的下界"
+echo
 echo "test_control_paths: fails=$fails"; exit "$fails"
