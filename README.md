@@ -72,3 +72,25 @@ bash scripts/deploy.sh
 - 操作手册（部署 / 回滚 / 内核模块重建 / 日志 / 故障处置）：`docs/OPERATIONS.md`
 - 安全模型与已知取舍：`SECURITY.md`
 - 设计与裁决（含 P0/P1/P2 复审附录 A/B/C）：`docs/specs/2026-10-06-pfan-design.md`
+
+## License
+
+GPL-3.0-or-later — full text in [`LICENSE`](LICENSE).
+
+This is an independent implementation. It was written without copying or decompiling any
+other project's code; development consulted only publicly documented behaviour of the
+hardware (the ACPI `_FSL`/`_FST` methods, `s0i3` mode, and `fine_grain_control`). See
+[`NOTICE`](NOTICE) for the full statement — which matters precisely because the license is
+copyleft.
+
+### Third-party components
+
+Vendored in `panel/vendor/`:
+
+| Component | Version | Author | License | Files |
+|---|---|---|---|---|
+| [uPlot](https://github.com/leeoniya/uPlot) | 1.6.32 | Leon Sorokin | MIT | `uPlot.esm.js`, `uPlot.min.css`, `uPlot.LICENSE` |
+
+Both distributed files are byte-identical to the `npm pack uplot@1.6.32` output (verified by
+sha256). MIT is compatible with GPL-3.0; the license text ships alongside them and is
+installed on the appliance.

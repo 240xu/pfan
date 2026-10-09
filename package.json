@@ -3,6 +3,8 @@
   "version": "1.0.0",
   "description": "Kernel ACPI helper + temperature daemon + web panel.",
   "private": true,
+  "license": "GPL-3.0-or-later",
+  "author": "pfan contributors",
   "directories": {
     "doc": "docs",
     "test": "tests"

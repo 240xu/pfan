@@ -982,7 +982,7 @@ describe("仪表弧：极性 + viewBox 裁切（专家审计 CRITICAL 2，浏览
   });
   // 第二个独立缺陷：即便 sweepFlag 修对，240° 的环在 cy=46 r=36 stroke=9 下
   // 需要 y ∈ [5.5, 86.5]，而 viewBox 只到 74 → 底部约 12.5 个单位被裁掉。
-  test("viewBox 必须容得下整���环（含 stroke）", async () => {
+  test("viewBox 必须容得下整个环（含 stroke）", async () => {
     const { gaugeMarkup } = await import("../../panel/core.js");
     const svg = gaugeMarkup({ id: "g1", label: "t", value: 52, min: 0, max: 105 });
     const m = svg.match(/viewBox="0 0 (\d+) (\d+)"/);

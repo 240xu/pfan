@@ -268,6 +268,54 @@ for _d in $_install_real; do
 done
 echo "  （共 $(printf '%s\n' $_install_real | grep -c . ) 个安装目标，已全部被恢复点逻辑覆盖；platform.conf 因只在缺失时写而豁免）"
 echo
+echo "== T17: 开源前置条件：LICENSE / NOTICE / 第三方声明 =="
+# 专家审计 checklist 第 1-3 项（硬阻断）：仓库声称 GPL-3.0-or-later 却没有 LICENSE，
+# 于是它其实是「保留一切权利」，GitHub 显示 No license，npm 也无法归类。
+if [ -s LICENSE ]; then ok "LICENSE 存在且非空"; else ng "缺 LICENSE —— 声称 GPL-3.0-or-later 却不发许可证，等于保留一切权利"; fi
+# 不能只判存在：得是 GPL-3.0 全文（35KB 左右），不是随手写的三行标题
+_lb=$(wc -c < LICENSE 2>/dev/null || echo 0)
+if [ "$_lb" -gt 30000 ]; then
+  ok "LICENSE 是 GPL-3.0 全文（$_lb 字节）"
+else
+  ng "LICENSE 只有 $_lb 字节 —— 不是 GPL-3.0 全文（应有 34000+ 字节）"
+fi
+grep -q 'TERMS AND CONDITIONS' LICENSE 2>/dev/null \
+  && ok "LICENSE 含 TERMS AND CONDITIONS 正文" \
+  || ng "LICENSE 不含 GPL 正文（可能只是个标题或占位文件）"
+grep -q 'END OF TERMS AND CONDITIONS' LICENSE 2>/dev/null \
+  && ok "LICENSE 正文完整（含结尾标记）" \
+  || ng "LICENSE 缺结尾标记 —— 文本被截断"
+if [ -s NOTICE ]; then ok "NOTICE 存在"; else ng "缺 NOTICE —— copyleft 项目应登记独立实现声明与第三方组件"; fi
+grep -q 'uPlot' NOTICE 2>/dev/null \
+  && ok "NOTICE 登记了内嵌的 uPlot" \
+  || ng "NOTICE 未登记内嵌的 uPlot（MIT 与 GPL-3.0 兼容但 §5(d) 要求随分发保留声明）"
+grep -q '独立实现' NOTICE 2>/dev/null \
+  && ok "NOTICE 含独立实现声明（copyleft 项目尤其重要）" \
+  || ng "NOTICE 缺独立实现声明"
+node -p "require('./package.json').license || ''" 2>/dev/null | grep -q 'GPL-3.0-or-later' \
+  && ok "package.json 声明 license=GPL-3.0-or-later" \
+  || ng "package.json 未声明 license（npm 无法归类该包）"
+# 内嵌的 MIT 文件必须随代码一起提交
+if [ -s panel/vendor/uPlot.LICENSE ]; then ok "panel/vendor/uPlot.LICENSE 随代码提交"; else ng "panel/vendor/uPlot.LICENSE 缺失 —— 分发 MIT 代码却不带其许可证"; fi
+echo
+echo "== T18: 仓库里不得有 U+FFFD（UTF-8 替换字符）—— 损坏的字符会静默留在文档与注释里 =="
+# 2026-10-09 一轮批量编辑里我自己引入了 18 处 U+FFFD，横跨 6 个文件（脚本、测试、
+# 文档），其中两处是更早就存在的。肉眼扫不出来 —— 中文注释里一个词被写坏成
+# 「可」后面跟三个坏字节这种形态，不影响任何语法检查，
+# 但它会原样出现在给读者看的手册里。所以必须机器检测，不能靠眼睛。
+_fffd=$(grep -rlP '\x{FFFD}' --exclude-dir=.git --exclude-dir=node_modules \
+         --exclude-dir=.superpowers --exclude-dir=.ruff_cache --exclude-dir=__pycache__ \
+         . 2>/dev/null)
+if [ -n "$_fffd" ]; then
+  ng "这些文件含 U+FFFD（损坏字符）：$(echo "$_fffd" | tr '\n' ' ')"
+  printf '%s\n' "$_fffd" | while read -r f; do
+    [ -n "$f" ] || continue
+    grep -nP '\x{FFFD}' "$f" 2>/dev/null | head -2 | sed 's/^/      /'
+  done
+else
+  ok "全仓库无 U+FFFD（无损坏字符）"
+fi
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"

@@ -1,0 +1,55 @@
+pfan — 松下 CFQV8 风扇控制套件
+Copyright (C) 2026 pfan contributors
+
+本程序是自由软件：你可以依《GNU 通用公共许可证》第三版或（由你选择）任何
+后续版重新分发与修改。完整条款见 LICENSE。
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License, version 3 or (at your option) any
+later version. See LICENSE for the full text.
+
+
+独立实现声明
+------------
+本项目是对松下 CFQV8 笔记本风扇的独立实现。开发过程中只查阅了**公开可得**的
+信息，用于确认若干硬件行为的公开描述：
+
+  * ACPI `_FSL` / `_FST` 方法是该机型风扇的固件控制接口；
+  * `s0i3` 工作模式（EC 0x79 = 0x02）下固件退出热保护、EC 跟随 `_FSL` 设定值；
+  * `fine_grain_control = 1` 时固件支持 1..120 的任意整数档位。
+
+本项目**未**复制、参考或反编译任何 panafanpwr（或同类）项目的代码。全部源码
+（内核模块 `core/pfanctl/pfanctl.c`、守护 `core/pfand`、后端 `server/pfanel.py`、
+面板 `panel/`）均为本项目自行编写。若日后引入他人代码，必须在此处登记来源、
+许可证与改动。
+
+由于本项目采用 copyleft 许可证，上述声明尤其重要：分发时必须保留完整许可证、
+保留版权声明，并明确指出任何被修改过的部分。
+
+
+第三方组件
+----------
+本仓库内嵌以下第三方软件：
+
+  uPlot 1.6.32 —— 面板的时序图表库
+    作者: Leon Sorokin
+    许可证: MIT
+    原文: https://github.com/leeoniya/uPlot
+    文件:   panel/vendor/uPlot.esm.js
+            panel/vendor/uPlot.min.css
+            panel/vendor/uPlot.LICENSE
+    说明:   两个分发文件与 npm 包 `uplot@1.6.32` 逐字节一致（经 `npm pack` 取出
+            后比对 sha256）。MIT 与 GPL-3.0 兼容；许可证全文随文件一起保留在
+            panel/vendor/uPlot.LICENSE，并按 GPL-3.0 §5(d) 的要求随分发提供。
+
+除上述之外，本仓库不含其他第三方代码。
+
+
+硬件相关风险
+------------
+本软件会直接控制一台真实机器的散热风扇。请注意：
+
+  * ACPI 方法 `_FSL` 的第一个参数为 `0` 时表示**停转**，不是"交回控制权"；
+  * 传感器读数为 0 或读失败一律按故障处理（立即满速），绝不按"温度低"处理；
+  * 任何配置自检失败都会 fail-safe 到满速 100% 而不是继续运行一个坏掉的控制律。
+
+改动 `core/pfand` 或 `core/pfanctl/pfanctl.c` 前请先读 `docs/OPERATIONS.md`。

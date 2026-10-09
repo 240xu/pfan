@@ -41,7 +41,7 @@ if [ -z "$(echo "$SMOKE_FILES" | tr ' ' '\n' | grep -c .)" ]; then
   echo "MISSING: smoke 文件集解析为空" >&2; rc=1
 else
   # 不落临时文件：原来的 `> "$HOME/.cache/pfan-smoke-guard"` 一旦重定向失败
-  # （HOME 指向不存在的目录即触发），复合命令非零 -> 走 else -> 报 ok���自我击穿）。
+  # （HOME 指向不存在的目录即触发），复合命令非零 -> 走 else -> 报 ok（自我击穿））。
   _hits=$(for f in $SMOKE_FILES; do
             [ -f "$f" ] || { echo "$f 不存在" >&2; continue; }
             grep -vE '^[[:space:]]*#' "$f" | grep -nE "$SMOKE_FORBIDDEN" | sed "s|^|$f:|"

@@ -93,10 +93,16 @@ curl -fsS http://<host>:8789/api/now | jq .
 4. 重启 `pfanel`、`pfand`，4b 段轮询等控制回路接管（`pfand=active` 且 `level>=1`，最多 30s）
 5. 实机 `bash scripts/smoke.sh`
 
-> ℹ️ 暂存名（**已于 2026-10-08 修复**，`b0ac675`）：`core/pfan` 与 `deploy/logrotate.d/pfan`
-> 都叫 `pfan`，两�� scp 到同一路径会互相覆盖 —— 后果是把 logrotate 规则装成
+> ℹ️ 暂存名（**已于 2026-10-08 修复**）：`core/pfan` 与 `deploy/logrotate.d/pfan`
+> 都叫 `pfan`，落到同一路径会互相覆盖 —— 后果是把 logrotate 规则装成
 > `/usr/local/bin/pfan`、把 CLI 装成 `/etc/logrotate.d/pfan`，而暂存后 `ls` 看不出来。
-> 现在 logrotate 走独立的 `$STAGE/logrotate-pfan`，守卫见 `test_repo_hygiene` T7。
+> 传输早已不用 `scp`（本机 scp 对该目标静默失败），改走 tar-over-ssh。
+> 现在的机制：`S()` 对 `deploy/` 开头的路径**保留子目录**，所以它落在
+> `$STAGE/deploy/logrotate.d/pfan`（与 `$STAGE/pfan` 天然不撞），随后再把 CLI
+> 改名成 `$STAGE/pfan-cli`。守卫见 `test_repo_hygiene` T7 与 T16。
+>
+> ⚠ 本页此前把这条写成"$STAGE/logrotate-pfan"并归给 `b0ac675`——那个名字在仓库里
+> 从不存在，`b0ac675` 是 vendor 修复；暂存名修复是 `b5b4de4`。已订正。
 > 本页此前的「deploy.sh 有待修缺陷」警告已随修复移除。
 
 ### 回滚

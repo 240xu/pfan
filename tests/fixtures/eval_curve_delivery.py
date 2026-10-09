@@ -8,7 +8,7 @@
 实测交付：performance 在 68°C 只给 54%，比现役的 60% 更弱 —— 与它的名字相反。
 
 做法：从 core/pfand 里【真的】抽出 want_for/floor_of/center_of，配上每份配置的参数
-放进干净子 shell 跑，逐温度点算交付档���。所以它评估的是现役代码，不是重写一份算法。
+放进干净子 shell 跑，逐温度点算交付档位。所以它评估的是现役代码，不是重写一份算法。
 
 用法：python3 tests/fixtures/eval_curve_delivery.py   （从仓库根运行）
 """

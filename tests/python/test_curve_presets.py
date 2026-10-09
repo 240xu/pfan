@@ -141,7 +141,7 @@ def test_every_preset_level_is_handled():
         assert res["floor_of_L0"] == -999, (
             f"{name}: floor_of(L0)={res['floor_of_L0']}，应为 -999"
         )
-        # 每个带���心的值必须落在该带的 [下界, 上界] 内，且【低于 EMERG】——
+        # 每个档位中心的值必须落在该带的 [下界, 上界] 内，且【低于 EMERG】——
         # 等于或高于 EMERG 就意味着 trim 恒为负、永久钉在 -TRIM
         for lv, c in res["centers"].items():
             assert c < res["emerg"], (

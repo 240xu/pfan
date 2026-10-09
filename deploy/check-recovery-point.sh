@@ -15,7 +15,7 @@
 #   否则它会因为读不到面板目录而「通过」，正是本脚本要防的那类假通过。
 #
 # 用法：sudo -n sh deploy/check-recovery-point.sh <恢复点目录>
-# 输出：第一行是缺的文件列表（可能���空），第二行是 "EXPECTED N" / "PRESENT M"
+# 输出：第一行是缺的文件列表（可能为空），第二行是 "EXPECTED N" / "PRESENT M"
 set -u
 B="${1:?用法: check-recovery-point.sh <恢复点目录>}"
 
