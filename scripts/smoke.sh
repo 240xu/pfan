@@ -273,5 +273,23 @@ case "$mt" in
   *)     bad "无法判断 .ko/.c 时间关系（读不到？）" ;;
 esac
 
+# §9b vermagic —— 只查时间戳【不够】：.ko 可以是刚复制的，但为旧内核编译。
+# 2026-10-09 21:48 实测踩到：机器自动升级到 6.8.0-146-generic，而 .ko 是为
+# 6.8.0-142 编的 -> insmod 报 "Invalid parameters" -> /dev/pfanctl 不出现 ->
+# pfanctl active=failed -> pfand/pfanel 跟着 inactive -> 面板与 API 全不可达。
+# 那个时间戳检查对新拷贝的 .ko 完全满意 —— 它只比 .c 与 .ko 的先后。
+printf '\n=== 9b. 内核模块 vermagic 必须匹配当前运行内核 ===\n'
+_kr=$(remote 'uname -r' 2>/dev/null)
+_vm=$(remote 'modinfo /opt/pfanctl/pfanctl.ko 2>/dev/null | sed -n "s/^vermagic:[[:space:]]*\([^ ]*\).*/\1/p"' 2>/dev/null)
+if [ -z "$_kr" ]; then
+  bad "读不到运行内核版本（uname -r 无输出）—— 无法判定 vermagic"
+elif [ -z "$_vm" ]; then
+  bad "读不到 /opt/pfanctl/pfanctl.ko 的 vermagic（modinfo 无输出）"
+elif [ "$_kr" = "$_vm" ]; then
+  ok "vermagic $_vm 与运行内核一致"
+else
+  bad "vermagic $_vm != 运行内核 $_kr —— insmod 会报 Invalid parameters，/dev/pfanctl 不出现，pfanctl/pfand/pfanel 全挂，风扇失去控制。重建：sudo rm -f /opt/pfanctl/pfanctl.ko /opt/pfanctl/pfanctl.o /opt/pfanctl/pfanctl.mod.c /opt/pfanctl/pfanctl.mod.o && sudo make -C /lib/modules/$(uname -r)/build M=/opt/pfanctl modules（只删 .ko 不够：源码没变时 make 认为无需重建，vermagic 保持旧的）"
+fi
+
 printf '\n=== smoke.sh: %s (rc=%d) ===\n' "$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)" "$rc"
 exit "$rc"

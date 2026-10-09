@@ -190,6 +190,24 @@ cd /opt/pfanctl
 sudo make -C /lib/modules/$(uname -r)/build M=/opt/pfanctl modules
 ```
 
+> ⚠ **内核自动升级后必须先删中间产物**，否则上面这条命令什么也不做：
+> `make` 按时间戳判断，源码没变 → 认为 `.ko` 是最新的 → 跳过重建 →
+> `.ko` 的 `vermagic` 仍是旧内核的 → `insmod` 报 `Invalid parameters`。
+> 这正是 2026-10-09 21:48 那次故障的成因（机器自动升到 `6.8.0-146-generic`，
+> `.ko` 还是为 `6.8.0-142-generic` 编的）。当时上面这条命令跑完毫无反应，
+> vermagic 原封不动。正确做法：
+>
+> ```bash
+> sudo rm -f /opt/pfanctl/pfanctl.ko /opt/pfanctl/pfanctl.o \
+>            /opt/pfanctl/pfanctl.mod.c /opt/pfanctl/pfanctl.mod.o \
+>            /opt/pfanctl/modules.order /opt/pfanctl/Module.symvers
+> sudo make -C /lib/modules/$(uname -r)/build M=/opt/pfanctl modules
+> sudo modinfo /opt/pfanctl/pfanctl.ko | grep vermagic     # 必须等于 uname -r
+> ```
+>
+> `smoke.sh` §9b 现在会核对 `vermagic` 与 `uname -r` 是否一致 —— §9 的时间戳检查
+> 对「新拷贝的 .ko」完全满意，而那正是升级后最可能出现的状态。
+
 > `deploy.sh` **不同步** `/opt/pfanctl`（传输清单里没有 `pfanctl.c`/`Makefile`），
 > 所以目标机 `/opt/pfanctl` 以机器为准 —— **这条不再是"需现场核对"，`smoke.sh` §9 每次
 > 都会比对**：（a）仓库与目标机 `pfanctl.c` 的 sha256，（b）`.ko` 是否早于 `.c`

@@ -42,9 +42,16 @@ if [ -z "$(echo "$SMOKE_FILES" | tr ' ' '\n' | grep -c .)" ]; then
 else
   # 不落临时文件：原来的 `> "$HOME/.cache/pfan-smoke-guard"` 一旦重定向失败
   # （HOME 指向不存在的目录即触发），复合命令非零 -> 走 else -> 报 ok（自我击穿））。
+  # ⚠ 必须剥掉【字符串字面量】再匹配：smoke.sh 里有一条 bad 消息是
+  # "…insmod 会报 Invalid parameters，/dev/pfanctl 不出现，pfanctl/pfand/pfanel 全挂…"
+  # —— 它是给人看的说明，却包含 `/dev/pfanctl` 与 `pfand`，直接匹配会把这句
+  # 说明判成写操作，ci 于是自己把自己判红（2026-10-09 实际发生）。
+  # 剥引号内容比剥注释更根本：注释里也不会有真写操作。
   _hits=$(for f in $SMOKE_FILES; do
             [ -f "$f" ] || { echo "$f 不存在" >&2; continue; }
-            grep -vE '^[[:space:]]*#' "$f" | grep -nE "$SMOKE_FORBIDDEN" | sed "s|^|$f:|"
+            sed 's/"[^"]*"//g; s/'"'"'[^'"'"']*'"'"'//g' "$f" \
+              | grep -vE '^[[:space:]]*#' \
+              | grep -nE "$SMOKE_FORBIDDEN" | sed "s|^|$f:|"
           done)
   if [ -n "$_hits" ]; then
     echo "smoke 文件含写操作（$SMOKE_FILES）:" >&2; echo "$_hits" >&2; rc=1
