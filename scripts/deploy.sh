@@ -35,8 +35,26 @@ _retry(){ # _retry <描述> <命令...>
 # R/S：每次调用先探一次连通性，隧道抖动就重试（有界）。探活用 -o ConnectTimeout=8。
 R(){ _retry "ssh $HOST" ssh "${SSHOPT[@]}" -o ConnectTimeout=8 pfan@"$HOST" true \
       && ssh "${SSHOPT[@]}" pfan@"$HOST" "$@"; }
-S(){ _retry "scp $HOST" scp "${SSHOPT[@]}" -o ConnectTimeout=8 pfan@"$HOST" true \
-      && scp "${SSHOPT[@]}" pfan@"$HOST" "$@"; }
+# 传输走 tar-over-ssh 而不是 scp：实测本机 scp 对该目标静默失败（连续 4 次、无输出、
+# rc≠0），而 tar|ssh 一次连接传全部文件更快也更稳。目标机只需有 tar（Ubuntu 默认有）。
+# 用法：S <本地相对路径...> —— 打进 $STAGE/ 的【扁平】文件名（tar 里剥掉目录前缀），
+# 因为安装段按 $STAGE/<name> 取。用一次连接传完，比逐个 scp 更快也更抗抖动。
+S(){ _retry "tar|ssh $HOST" ssh "${SSHOPT[@]}" pfan@"$HOST" true \
+      && { local t; t=$(mktemp -d "${TMPDIR:-/tmp}/pfansend.XXXXXX") || return 1
+           # 必须显式改名落盘：cp "src" "$t/" 遇到同名会【拒绝覆盖】（实测
+           # "will not overwrite just-created"），于是 core/pfan 与
+           # deploy/logrotate.d/pfan 只能进去一个，另一个静默丢失。
+           local f; for f in "$@"; do
+             case "$f" in
+               # deploy/logrotate.d/pfan 保留子目录（靠它与 core/pfan 区分），
+               # 其它一律扁平到 $STAGE/<basename>，因���安装段按 $STAGE/<name> 取
+               deploy/*) mkdir -p "$t/deploy/logrotate.d"
+                          cp "$f" "$t/$f" || { rm -rf "$t"; return 1; } ;;
+               *)      cp "$f" "$t/$(basename "$f")" || { rm -rf "$t"; return 1; } ;;
+             esac
+           done
+           tar -cf - -C "$t" . | ssh "${SSHOPT[@]}" pfan@"$HOST" "tar -xf - -C '$STAGE'"
+           local rc=$?; rm -rf "$t"; return $rc; }; }
 TS=$(date +%Y%m%d-%H%M%S)
 B="/root/backups/pfan-deploy-$TS"
 STAGE="/tmp/pfan-deploy-$$"
@@ -66,24 +84,25 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt
 
 echo "== 2/5 传输 =="
 # 不加 || true：任何一次传输失败都必须中止，否则会拿残缺的暂存目录去安装
-S core/pfand core/pfan core/platform.sh               "pfan@$HOST:$STAGE/"
-S server/pfanel.py server/pfan_platform.py server/pfan_core.py "pfan@$HOST:$STAGE/"
-S panel/index.html panel/styles.css panel/app.js panel/core.js "pfan@$HOST:$STAGE/"
-S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$STAGE/"
+S core/pfand core/pfan core/platform.sh
+S server/pfanel.py server/pfan_platform.py server/pfan_core.py
+S panel/index.html panel/styles.css panel/app.js panel/core.js
+S platform/platform.conf.example platform/fan-candidates.txt
 # ⚠ 必须用独立暂存名：core/pfan 也叫 $STAGE/pfan，两份 scp 到同一路径会互相覆盖，
 # 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
 #（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
-S deploy/logrotate.d/pfan                       "pfan@$HOST:$STAGE/logrotate-pfan"
+# core/pfan 与 deploy/logrotate.d/pfan 同名：S 落盘时用【各自目录】避开冲突
+# （$STAGE/pfan 与 $STAGE/logrotate.d/pfan），这里再把 CLI 改名成 pfan-cli，
+# 让 $STAGE/pfan 这个名字空出来给 logrotate 规则 —— 否则安装出来的是
+# logrotate 规则装成 /usr/local/bin/pfan、CLI 装成 /etc/logrotate.d/pfan（C3 原始缺陷）。
+R "mv -f '$STAGE/pfan' '$STAGE/pfan-cli'"
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
 # 不执行（连 boot() 都不跑），而冒烟只比对 4 个非 vendor 文件 → 闸门全照绿
 # （专家审计 C1：看不见失败的闸门比没有闸门更危险）。
-S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
-    "pfan@$HOST:$STAGE/"
+S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
 # 不执行（连 boot() 都不跑），而现有冒烟只比对 4 个非 vendor 文件 → 三道闸门全照绿
 # （2026-10-08 专家审计 C1：这是比没有闸门更危险的静默失败）。
-S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
-    "pfan@$HOST:$STAGE/"
 R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
@@ -100,12 +119,12 @@ R "set -e
     sudo -n install -m 644 '$STAGE/platform.sh' /usr/local/lib/pfan/platform.sh
     # 3c. 运行单元（python 模块必须与 pfanel.py 同目录：sys.path[0] 就是脚本目录）
     sudo -n install -m 755 '$STAGE/pfand'        /usr/local/bin/pfand
-    sudo -n install -m 755 '$STAGE/pfan'         /usr/local/bin/pfan
+    sudo -n install -m 755 '$STAGE/pfan-cli'     /usr/local/bin/pfan
     sudo -n install -m 755 '$STAGE/pfanel.py'    /usr/local/bin/pfanel.py
     sudo -n install -m 644 '$STAGE/pfan_platform.py' /usr/local/bin/pfan_platform.py
     sudo -n install -m 644 '$STAGE/pfan_core.py'     /usr/local/bin/pfan_core.py
     # 3d. ⑭ 日志轮转：不装的话 /var/log/pfand.log 会无限长
-    sudo -n install -m 644 '$STAGE/logrotate-pfan' /etc/logrotate.d/pfan
+    sudo -n install -m 644 '$STAGE/logrotate.d/pfan' /etc/logrotate.d/pfan
     # 先做一次语法演练 —— 配置写错了要等一个月才爆，而且那时日志已经不可控
     sudo -n logrotate -d /etc/logrotate.d/pfan >/dev/null
     echo '  /etc/logrotate.d/pfan 已安装并通过 logrotate -d 自检'

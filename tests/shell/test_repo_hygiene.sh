@@ -114,18 +114,20 @@ fi
 
 
 sec "T7: deploy.sh 暂存不能让 logrotate 配置与 CLI 抢同一个名字"
-# core/pfan 暂存后叫 $STAGE/pfan；若 deploy/logrotate.d/pfan 也 scp 到 $STAGE/，
-# 两者同名互相覆盖 —— 结果是把 logrotate 规则装成 /usr/local/bin/pfan、把 CLI 装成
-# 日志轮转规则，而暂存后 `ls` 完全看不出来（两份内容都"在"，只是名字被抢了）。
-if grep -qF '$STAGE/logrotate-pfan' scripts/deploy.sh; then
-  ok "logrotate 用独立暂存名 \$STAGE/logrotate-pfan"
+# 唯一要防的是【碰撞】：CLI 与 logrotate 从同一个暂存源安装（历史缺陷：两者都落到
+# $STAGE/pfan，于是 logrotate 规则装成 /usr/local/bin/pfan、CLI 装成 /etc/logrotate.d/pfan）。
+# 判定：解析出两个安装源，比它们是否同名 —— 不强制某一种改法。
+D=scripts/deploy.sh
+cli_src=$(grep 'install -m 755' "$D" | grep 'usr/local/bin/pfan$' \
+          | sed -n 's/.*\$STAGE\/\([A-Za-z0-9._/-]*\).*/\1/p')
+lr_src=$(grep 'install -m 644' "$D" | grep '/etc/logrotate.d/pfan$' \
+         | sed -n 's/.*\$STAGE\/\([A-Za-z0-9._/-]*\).*/\1/p')
+if [ -z "$cli_src" ] || [ -z "$lr_src" ]; then
+  ng "认不出安装源（CLI=[$cli_src] logrotate=[$lr_src]）—— deploy.sh 结构变了？守卫需同步"
+elif [ "$cli_src" = "$lr_src" ]; then
+  ng "CLI 与 logrotate 都从 [$cli_src] 安装 —— 必然互相覆盖，装出来的是错的东西"
 else
-  ng "logrotate 仍暂存为 \$STAGE/pfan —— 会覆盖 CLI，下一次部署就装错"
-fi
-if grep -q 'STAGE/pfan.*usr/local/bin/pfan' scripts/deploy.sh; then
-  ok "CLI 仍从 \$STAGE/pfan 安装（该名字未被 logrotate 抢走）"
-else
-  ng "deploy.sh 里找不到 CLI 安装行 —— 安装目标变了？"
+  ok "CLI 源=[$cli_src] ≠ logrotate 源=[$lr_src]，无碰撞"
 fi
 
 sec "T8: pre-push 必须接住 ssh 探测的退出码，否则跳过分支是死代码"
