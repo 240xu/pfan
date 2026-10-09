@@ -85,6 +85,9 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt
 echo "== 2/5 传输 =="
 # 不加 || true：任何一次传输失败都必须中止，否则会拿残缺的暂存目录去安装
 S core/pfand core/pfan core/platform.sh
+# deploy/ 开头的路径在暂存区保留子目录（$STAGE/logrotate.d/pfan），与 $STAGE/pfan
+# 区分开 —— 否则两者同名互相覆盖，就是 C3 那个「logrotate 装成 CLI」的缺陷
+S deploy/logrotate.d/pfan
 S server/pfanel.py server/pfan_platform.py server/pfan_core.py
 S panel/index.html panel/styles.css panel/app.js panel/core.js
 S platform/platform.conf.example platform/fan-candidates.txt
@@ -136,10 +139,6 @@ R "set -e
     sudo -n install -m 644 $STAGE/styles.css /opt/beszel/beszel_data/styles.css
     sudo -n install -m 755 $STAGE/app.js     /opt/beszel/beszel_data/app.js
     sudo -n install -m 644 $STAGE/core.js    /opt/beszel/beszel_data/core.js
-    sudo -n mkdir -p /opt/beszel/beszel_data/vendor
-    sudo -n install -m 644 $STAGE/uPlot.esm.js   /opt/beszel/beszel_data/vendor/uPlot.esm.js
-    sudo -n install -m 644 $STAGE/uPlot.min.css  /opt/beszel/beszel_data/vendor/uPlot.min.css
-    sudo -n install -m 644 $STAGE/uPlot.LICENSE  /opt/beszel/beszel_data/vendor/uPlot.LICENSE
     sudo -n mkdir -p /opt/beszel/beszel_data/vendor
     sudo -n install -m 644 $STAGE/uPlot.esm.js   /opt/beszel/beszel_data/vendor/uPlot.esm.js
     sudo -n install -m 644 $STAGE/uPlot.min.css  /opt/beszel/beszel_data/vendor/uPlot.min.css
