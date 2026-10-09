@@ -110,8 +110,13 @@ describe("fetchJson（⑰ 错误必须被翻译成人话）", () => {
 });
 
 describe("isStale / statusText（⑰ cached 与 age）", () => {
-  test("cached=true 视为过期（拿的是缓存快照）", () => {
-    expect(isStale({ temp: 50, cached: true, age: 1 })).toBe(true);
+  // ⚠ 这条断言 2026-10-09 被推翻：server/pfanel.py 的 API 查询路径
+  // （snapshot(live=False)）为了 <1ms 【永远】返回 cached=true，所以把它当过期信号
+  // 等于面板永远显示"缓存快照"。实机浏览器验证：API 报 cached=true/age=10，面板却
+  // 声称陈旧。新鲜度的唯一判据是 age。
+  test("cached=true 但 age 新 ⇒ 不算过期（API 查询本就总走缓存）", () => {
+    expect(isStale({ temp: 50, cached: true, age: 1 })).toBe(false);
+    expect(isStale({ temp: 50, cached: true, age: 99 })).toBe(true);
   });
 
   test("age 超过阈值（默认 20s，采样周期 10s 的两倍）视为过期", () => {
@@ -131,7 +136,9 @@ describe("isStale / statusText（⑰ cached 与 age）", () => {
   test("statusText 要能区分「实时 / 缓存 / 中断」", () => {
     expect(statusText({ temp: 50, cached: false, age: 2 })).toMatch(/实时/);
     expect(statusText({ temp: 50, cached: false, age: 32 })).toMatch(/32|缓存/);
-    expect(statusText({ temp: 50, cached: true, age: 3 })).toMatch(/缓存/);
+    expect(statusText({ temp: 50, cached: true, age: 3 })).toMatch(/实时/);  // age 新=实时
+    expect(statusText({ temp: 50, cached: true })).toMatch(/缓存/);       // 无 age 才退回保守
+
     expect(statusText(null)).toMatch(/中断|无数据/);
   });
 
@@ -932,5 +939,28 @@ describe("V3: 表盘必须真的接进 app.js（不是写在 core 里没人用�
     const code = codeOnly(await appSrc());
     expect(code).toMatch(/gaugeMarkup\(/);
     expect(code).toMatch(/from\s+["']\/pfan-core\.js["']/);
+  });
+});
+
+describe("⑰ 语义修正：cached 不等于过期（API 查询本就总走缓存）", () => {
+  // server/pfanel.py:snapshot() 里 live=False（API 查询路径）总是返回 cached=True，
+  // 新鲜度由 age 表达。把 cached 当"过期信号"会让面板永远显示"缓存快照"——
+  // 2026-10-09 实机浏览器验证发现：API 报 cached=true/age=10，面板却显示陈旧。
+  test("cached=true 但 age 很新 ⇒ 不算过期", async () => {
+    const { isStale } = await import("../../panel/core.js");
+    expect(isStale({ cached: true, age: 3 }, 20)).toBe(false);
+  });
+  test("cached=true 且 age 超阈值 ⇒ 算过期", async () => {
+    const { isStale } = await import("../../panel/core.js");
+    expect(isStale({ cached: true, age: 99 }, 20)).toBe(true);
+  });
+  test("cached=false 但 age 超阈值 ⇒ 算过期（age 才是判据）", async () => {
+    const { isStale } = await import("../../panel/core.js");
+    expect(isStale({ cached: false, age: 99 }, 20)).toBe(true);
+  });
+  test("statusText 不再因 cached 一律显示『缓存快照』", async () => {
+    const { statusText } = await import("../../panel/core.js");
+    expect(statusText({ cached: true, age: 3, temp: 50, level: 30 }, 20))
+      .not.toMatch(/缓存快照/);
   });
 });

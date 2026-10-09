@@ -88,20 +88,27 @@ export function staleAgeLimit(iv) {
 /** ⑰ 快照是否已过期：服务端标了 cached，或 age 超过阈值（调用方用 staleAgeLimit(IV) 算）。 */
 export function isStale(d, maxAge = DEFAULT_STALE_AGE) {
   if (!d) return true;
-  if (d.cached) return true;
-  if (typeof d.age === "number" && d.age > maxAge) return true;
-  return false;
+  // ⚠ cached 只表示"数据来自采集器缓存"——server/pfanel.py 的 API 查询路径
+  // （snapshot(live=False)）为了 <1ms 永远返回 cached=true，所以它【不是】过期信号。
+  // 真正的判据是 age（采集器快照的年龄）。2026-10-09 实机浏览器验证：API 报
+  // cached=true / age=10，面板却显示"缓存快照（服务端未实时刷新）"——就是这个误判。
+  if (typeof d.age === "number") return d.age > maxAge;
+  // 没有 age 可依据时，退回用 cached：宁可保守说陈旧，也不要谎称实时
+  return d.cached === true;
 }
 
 /** ⑰ 状态条文案：实时 / 数据滞后 / 缓存 / 中断。err 非空时优先显示错误原因。 */
 export function statusText(d, maxAge = DEFAULT_STALE_AGE, err = null) {
   if (err) return "⚠ " + err;
   if (!d) return "⚠ 无数据（连接中断？）";
-  if (d.cached) return "缓存快照（服务端未实时刷新）";
-  if (typeof d.age === "number" && d.age > maxAge) {
-    return "数据滞后 " + Math.round(d.age) + "s（采样中断？）";
+  // age 是判据，cached 不是：API 查询路径永远 cached=true（见 isStale 注释）。
+  if (typeof d.age === "number") {
+    return d.age > maxAge
+      ? "数据滞后 " + Math.round(d.age) + "s（采样中断？）"
+      : "实时";
   }
-  return "实时";
+  // 没有 age 可依据时才退回 cached，宁可保守也不谎称实时
+  return d.cached ? "缓存快照（无 age，无法判断新鲜度）" : "实时";
 }
 
 /** M5 前端曲线渲染的纯部分（原 renderCurve 内联）：档位表行 HTML。
