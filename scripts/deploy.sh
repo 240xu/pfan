@@ -8,6 +8,10 @@ trap 'echo "[FAIL] deploy 中止于第 $LINENO 行" >&2' ERR
 cd "$(dirname "$0")/.."
 
 HOST="${PFAN_HOST:-192.168.1.10}"
+# 就绪检查用的 API 根：默认直连 LAN 的 $HOST:8789；目标机只能经隧道/公网到达时，
+# 用 PFAN_API_BASE 覆盖（例：https://pfan.example.com）。两者都不可达时该步会失败，
+# 这比"悄悄跳过就绪检查"安全 —— 服务没起来就不该继续。
+API_BASE="${PFAN_API_BASE:-http://$HOST:8789}"
 KEY="$HOME/.ssh/pfan_deploy_key"
 SSHOPT=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15)
 R="ssh ${SSHOPT[@]} pfan@$HOST"
@@ -116,7 +120,7 @@ for i in $(seq 1 30); do
   st=$($R "systemctl is-active pfand" 2>/dev/null || echo "?")
   # 用 jq 而不是 sed：原始 JSON 是 `"level": 40`（冒号后有空格），
   # sed 贪婪匹配会因为这个空格永远失配（2026-10-06 实测 30s 全程误判为未接管）。
-  lvl=$(timeout 12 curl -fsS --max-time 8 "http://$HOST:8789/api/now" 2>/dev/null \
+  lvl=$(timeout 12 curl -fsS --max-time 8 "$API_BASE/api/now" 2>/dev/null \
         | jq -r '.level // empty' 2>/dev/null)
   if [ "$st" = active ] && [ -n "${lvl:-}" ] && [ "$lvl" -ge 1 ] 2>/dev/null; then
     echo "  第 ${i}s: pfand=$st level=$lvl → 已接管"
@@ -138,3 +142,4 @@ bash scripts/smoke.sh
 echo
 echo "deploy OK"
 echo "  回滚点: $HOST:$B"
+echo "  就绪检查用的 API: $API_BASE"
