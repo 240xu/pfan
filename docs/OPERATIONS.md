@@ -93,12 +93,11 @@ curl -fsS http://<host>:8789/api/now | jq .
 4. 重启 `pfanel`、`pfand`，4b 段轮询等控制回路接管（`pfand=active` 且 `level>=1`，最多 30s）
 5. 实机 `bash scripts/smoke.sh`
 
-> ⚠️ **已知缺陷（2026-10-07 静态确认，执行前必读）**：`scripts/deploy.sh` 先把 `core/pfan`
-> 传成 `$STAGE/pfan`（第 33 行），又把 `deploy/logrotate.d/pfan` 传成**同一个**
-> `$STAGE/pfan`（第 37 行，后者覆盖前者），随后第 54 行把 `$STAGE/pfan` 安装为
-> `/usr/local/bin/pfan` —— 装完的「pfan CLI」其实是 logrotate 配置，smoke 第 8 段
-> `pfan get` 必失败。**修好前不要跑 `bash scripts/deploy.sh`**；`deploy.sh` 不在本轮
-> 修复范围内，已上报协调者。
+> ℹ️ 暂存名（**已于 2026-10-08 修复**，`b0ac675`）：`core/pfan` 与 `deploy/logrotate.d/pfan`
+> 都叫 `pfan`，两�� scp 到同一路径会互相覆盖 —— 后果是把 logrotate 规则装成
+> `/usr/local/bin/pfan`、把 CLI 装成 `/etc/logrotate.d/pfan`，而暂存后 `ls` 看不出来。
+> 现在 logrotate 走独立的 `$STAGE/logrotate-pfan`，守卫见 `test_repo_hygiene` T7。
+> 本页此前的「deploy.sh 有待修缺陷」警告已随修复移除。
 
 ### 回滚
 

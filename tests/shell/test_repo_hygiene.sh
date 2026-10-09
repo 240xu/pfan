@@ -188,5 +188,44 @@ else
   ng "ci.sh 不要求 vendor 资源存在 —— 误删后 CI 仍绿"
 fi
 
+sec "T12: 恢复点必须覆盖第 3 步覆盖的每一个路径（否则半途失败不可回滚）"
+# 专家审计 C2：恢复点原本只备 5 个 /usr/local/bin/* 二进制，而第 3 步还会覆盖
+# /etc/logrotate.d/pfan、/usr/local/lib/pfan/platform.sh、/etc/pfan/fan-candidates.txt
+# 与 4 个面板文件。中途失败 = 新二进制 + 旧面板的混合态，而重跑 deploy 会把混合态
+# 再备一次 —— 原始好状态永远丢失。
+for path in /etc/logrotate.d/pfan /usr/local/lib/pfan/platform.sh \
+            /etc/pfan/fan-candidates.txt /opt/beszel/beszel_data/index.html \
+            /opt/beszel/beszel_data/styles.css /opt/beszel/beszel_data/app.js \
+            /opt/beszel/beszel_data/core.js; do
+  if grep -qF "$path" scripts/deploy.sh; then
+    # 出现在备份段（step 1，mkdir 恢复点那一段）才算数；只在安装段出现是不够的
+    # 备份段的窗口必须是【整个 step 1】，不能用硬编码行号——上一个版本用 1,32p，
+    # 备份块一超过就误报"没备份"（守卫自己先崩，比没守卫更糟）
+    if awk '/^echo "== 1\//,/^echo "== 2\//' scripts/deploy.sh | grep -qF "$path"; then
+      ok "恢复点覆盖 $path"
+    else
+      ng "第3步会覆盖 $path，但恢复点没备份它 —— 中途失败不可回滚"
+    fi
+  else
+    ng "deploy.sh 里找不到 $path（安装段被改过？守卫需要同步）"
+  fi
+done
+
+sec "T13: 已修的缺陷不得继续以『已知缺陷/修好前不要跑』形式留在文档里（专家审计 C3/C4）"
+# 这些警告在修复后继续存在，会让人拒跑一个已经正确的脚本，或按幻影缺陷手工绕路。
+for bad_phrase in '修好前不要跑' 'deploy.sh 不在本轮' ; do
+  if grep -qF "$bad_phrase" README.md docs/OPERATIONS.md 2>/dev/null; then
+    ng "文档仍把已修的暂存名冲突写成待修：\"$bad_phrase\""
+  else
+    ok "文档不再声称 deploy.sh 有待修缺陷（\"$bad_phrase\"）"
+  fi
+done
+# C4：spec 不得把未发生的文档改动标成已完成
+if grep -qE 'README 同步改为如实描述。' docs/specs/2026-10-06-pfan-design.md 2>/dev/null; then
+  ng "spec 仍有一行未加限定地声称『README 同步改为如实描述』"
+else
+  ok "spec 里该声称已带限定/订正说明"
+fi
+
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"

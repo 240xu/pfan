@@ -37,10 +37,9 @@ bash scripts/install-hooks.sh    # 装 pre-push 钩子（.git/hooks 不受版本
 `pre-push` 钩子（`hooks/pre-push`，POSIX sh）串联两者，两种情形必须分开说：
 
 - 机器**可达**时：ci 与 smoke 都必须通过，否则拒绝 push；
-- 机器**不可达**时：ci 照常跑完，随后钩子在可达性探测那行因 `set -e`
-  直接以非 0 退出 → **push 被拒绝**，smoke 不执行（已在本地 git 仓库实测：
-  钩子内「打印跳过原因 / `PFAN_SKIP_SMOKE=1` 放行」的分支在该路径上不可达，
-  设 flag 也放不了行 —— `hooks/pre-push` 的已知缺陷，需其负责人修）。
+- 机器**不可达**时：ci 照常跑完，钩子打印不可达原因（`ssh: connect to host ...`）后放行；
+  `PFAN_SKIP_SMOKE=1` 会额外打印一行确认。机器可达时 smoke 照跑，失败即拒绝推送
+  （**flag 不能绕过真正失败的 smoke**）。
 
 而 `bash scripts/smoke.sh` 自身**从不跳过**：第 0 段 SSH 探测失败直接 `exit 1`
 （`scripts/smoke.sh` 的可达性检查）。
@@ -59,9 +58,10 @@ bash scripts/deploy.sh
 等待控制回路接管（最多 30s）→ 实机 `bash scripts/smoke.sh`。
 回滚点路径打印在脚本结尾。
 
-> ⚠️ 已知缺陷：`deploy.sh` 的暂存目录里 `core/pfan` 与 `deploy/logrotate.d/pfan`
-> 同名相撞，安装后 `/usr/local/bin/pfan` 可能变成 logrotate 配置。执行前先读
-> `docs/OPERATIONS.md` 的「部署与回滚」一节。
+> ℹ️ 暂存名：`core/pfan` 与 `deploy/logrotate.d/pfan` 都叫 `pfan`，所以 logrotate 走
+> 独立的 `$STAGE/logrotate-pfan`。同名的后果曾是把 logrotate 规则装成
+> `/usr/local/bin/pfan`——现已修复，并由 `test_repo_hygiene` T7 钉住。
+
 
 **回滚**：把恢复点里的文件拷回原位 + `systemctl restart pfanel pfand`
 （**不要**顺手重启 `pfanctl` —— deploy 不动内核模块，见「服务」一节的覆盖边界），

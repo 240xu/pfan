@@ -25,6 +25,17 @@ $R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /op
     for f in /usr/local/bin/pfand /usr/local/bin/pfan /usr/local/bin/pfanel.py \
              /usr/local/bin/pfan_platform.py /usr/local/bin/pfan_core.py; do \
       [ -e \"\$f\" ] && sudo -n cp -a \"\$f\" '$B/'; done; \
+        # 第 3 步覆盖的每一个路径都必须在这里备份 —— 否则中途失败会留下「新二进制 +
+        # 旧面板」的混合态，而重跑 deploy 会把混合态再备一次，原始好状态永远丢失
+        # （专家审计 C2）。platform.conf 例外：它只在【缺失时】写入，不覆盖。
+        for f in /etc/logrotate.d/pfan /usr/local/lib/pfan/platform.sh \
+                 /etc/pfan/fan-candidates.txt \
+                 /opt/beszel/beszel_data/index.html /opt/beszel/beszel_data/styles.css \
+                 /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/core.js \
+                 /opt/beszel/beszel_data/vendor/uPlot.esm.js \
+                 /opt/beszel/beszel_data/vendor/uPlot.min.css \
+                 /opt/beszel/beszel_data/vendor/uPlot.LICENSE; do
+          [ -e "\$f" ] && sudo -n cp -a --parents "\$f" '$B/' 2>/dev/null || true; done; \
     [ -d /opt/beszel/beszel_data ] && sudo -n cp -a /opt/beszel/beszel_data/pfan.html '$B/' 2>/dev/null || true; \
     echo '  备份: $B'; ls -la '$B' | tail -n +2 | sed 's/^/    /'"
 
@@ -38,6 +49,11 @@ $S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$ST
 # 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
 #（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
 $S deploy/logrotate.d/pfan                       "pfan@$HOST:$STAGE/logrotate-pfan"
+# vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
+# 不执行（连 boot() 都不跑），而冒烟只比对 4 个非 vendor 文件 → 闸门全照绿
+# （专家审计 C1：看不见失败的闸门比没有闸门更危险）。
+$S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
+    "pfan@$HOST:$STAGE/"
 # vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
 # 不执行（连 boot() 都不跑），而现有冒烟只比对 4 个非 vendor 文件 → 三道闸门全照绿
 # （2026-10-08 专家审计 C1：这是比没有闸门更危险的静默失败）。
@@ -76,6 +92,10 @@ $R "set -e
     sudo -n install -m 644 $STAGE/styles.css /opt/beszel/beszel_data/styles.css
     sudo -n install -m 755 $STAGE/app.js     /opt/beszel/beszel_data/app.js
     sudo -n install -m 644 $STAGE/core.js    /opt/beszel/beszel_data/core.js
+    sudo -n mkdir -p /opt/beszel/beszel_data/vendor
+    sudo -n install -m 644 $STAGE/uPlot.esm.js   /opt/beszel/beszel_data/vendor/uPlot.esm.js
+    sudo -n install -m 644 $STAGE/uPlot.min.css  /opt/beszel/beszel_data/vendor/uPlot.min.css
+    sudo -n install -m 644 $STAGE/uPlot.LICENSE  /opt/beszel/beszel_data/vendor/uPlot.LICENSE
     sudo -n mkdir -p /opt/beszel/beszel_data/vendor
     sudo -n install -m 644 $STAGE/uPlot.esm.js   /opt/beszel/beszel_data/vendor/uPlot.esm.js
     sudo -n install -m 644 $STAGE/uPlot.min.css  /opt/beszel/beszel_data/vendor/uPlot.min.css
