@@ -11,7 +11,11 @@ HOST="${PFAN_HOST:-192.168.1.10}"
 # 就绪检查用的 API 根：默认直连 LAN 的 $HOST:8789；目标机只能经隧道/公网到达时，
 # 用 PFAN_API_BASE 覆盖（例：https://pfan.example.com）。两者都不可达时该步会失败，
 # 这比"悄悄跳过就绪检查"安全 —— 服务没起来就不该继续。
-API_BASE="${PFAN_API_BASE:-http://$HOST:8789}"
+# 两个变量名并存的坑：smoke.sh 读 PFAN_API，deploy.sh 读 PFAN_API_BASE。
+# 传错一个不会报错，只是那个变量静默取默认值 —— 2026-10-09 因为这个，
+# 4b 步一直拿默认的 http://<host>:8789 去 curl 而误判「控制回路未接管」。
+# 现在两个都认，以 PFAN_API 为准。
+API_BASE="${PFAN_API:-${PFAN_API_BASE:-http://$HOST:8789}}"
 KEY="$HOME/.ssh/pfan_deploy_key"
 SSHOPT=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15)
 # 目标机只能经 Cloudflare SSH 隧道到达时，cloudflared access 会出现 banner 超时抖动
@@ -213,8 +217,14 @@ for i in $(seq 1 30); do
   st=$(R "systemctl is-active pfand" 2>/dev/null || echo "?")
   # 用 jq 而不是 sed：原始 JSON 是 `"level": 40`（冒号后有空格），
   # sed 贪婪匹配会因为这个空格永远失配（2026-10-06 实测 30s 全程误判为未接管）。
-  lvl=$(timeout 12 curl -fsS --max-time 8 "$API_BASE/api/now" 2>/dev/null \
-        | jq -r '.level // empty' 2>/dev/null)
+  # 走 pfan get 而不是 HTTP：HTTP 那条要 $API_BASE 可达，而它在本机解析成
+  # http://<ssh-host>:8789 —— 目标是家用 LAN 上的机器、从 CF 隧道 SSH 进来时，
+  # 这个地址的 8789 只有本机回环监听，于是 curl 永远拿不到 level，30s 全程误判
+  # 「控制回路未接管」，而实际 pfand 早已 active 且 level=33（2026-10-09 实测）。
+  # 变量名也不一致：deploy 读 PFAN_API_BASE，smoke 读 PFAN_API。
+  lvl=$(R "sudo -n /usr/local/bin/pfan get 2>/dev/null | tail -1" 2>/dev/null \
+        | sed -n 's/^\[0,[0-9]*,[0-9]*\]$/&/p' \
+        | awk -F, '{gsub(/\]/,"",$2); print $2}')
   if [ "$st" = active ] && [ -n "${lvl:-}" ] && [ "$lvl" -ge 1 ] 2>/dev/null; then
     echo "  第 ${i}s: pfand=$st level=$lvl → 已接管"
     ready=1; break
