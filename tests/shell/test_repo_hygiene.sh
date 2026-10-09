@@ -316,6 +316,35 @@ else
   ok "全仓库无 U+FFFD（无损坏字符）"
 fi
 echo
+echo "== T19: 文档不得声称一个本仓库无法核实的结论已实操验证 =="
+# 审计 I-8：OPERATIONS 的回滚流程写着"未经目标机实操验证"，而它列出的"恢复点里没有的
+# 东西"里有 7 个面板文件 —— 那些文件其实都在恢复点里。带"[未验证]"标记的错误陈述比
+# 没有标记更糟：它看起来像是被审过的。
+# 现在回滚流程已在目标机实操（恢复点 /root/backups/pfan-deploy-<timestamp> 的实际
+# 布局核对），所以那句"未经实操验证"必须消失；而真正无法核实的仍要带 [未验证]。
+if grep -qF '未经目标机实操验证' README.md docs/OPERATIONS.md 2>/dev/null; then
+  ng "回滚流程已在目标机实操过，文档却仍写『未经目标机实操验证』"
+else
+  ok "回滚流程的验证状态与实际一致（已实操验证）"
+fi
+# 反向：恢复点确实覆盖了面板文件，文档不得再说它没有
+if grep -qE '恢复点里没有的东西|面板 4 文件.*只备份' docs/OPERATIONS.md 2>/dev/null; then
+  ng "文档仍声称恢复点不含面板文件 —— 实际 10/10 都在（2026-10-09 核实）"
+else
+  ok "文档不再声称恢复点缺面板文件"
+fi
+# logrotate-pfan 这个路径从未存在于仓库
+# 只在【声称它存在】的语境里判失败：OPERATIONS 里有一句「本页此前把它写成
+# $STAGE/logrotate-pfan」，那是订正说明，提到这个名字是对的。所以排除含
+# 「此前」/「写成」的行，只抓把它当现有路径讲的地方。
+if grep -rn 'logrotate-pfan' README.md docs/ 2>/dev/null | grep -vE '此前|写成|从不存在' \
+     | grep -q .; then
+  ng "文档仍把 \$STAGE/logrotate-pfan 当成现有路径 —— 它从未在仓库里存在过"
+  grep -rn 'logrotate-pfan' README.md docs/ 2>/dev/null | grep -vE '此前|写成|从不存在' | sed 's/^/      /'
+else
+  ok "文档不再把不存在的 \$STAGE/logrotate-pfan 当成现有路径（订正说明中的提及不计）"
+fi
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"

@@ -89,7 +89,7 @@ curl -fsS http://<host>:8789/api/now | jq .
 1. 本地 `bash scripts/ci.sh`（不绿不动目标机）
 2. 目标机建恢复点 `/root/backups/pfan-deploy-<时间戳>/`，新文件暂存 `/tmp/pfan-deploy-$$`
 3. 传输 + 安装：`/etc/pfan/platform.conf` **只在缺失时**由 example 建立（已有配置绝不覆盖）；
-   运行单元 / 加载器 / logrotate（带 `logrotate -d` 自检）/ 面板 4 文件
+   运行单元 / 加载器 / logrotate（带 `logrotate -d` 自检）/ 面板 7 文件（4 主文件 + 3 vendor）
 4. 重启 `pfanel`、`pfand`，4b 段轮询等控制回路接管（`pfand=active` 且 `level>=1`，最多 30s）
 5. 实机 `bash scripts/smoke.sh`
 
@@ -107,21 +107,51 @@ curl -fsS http://<host>:8789/api/now | jq .
 
 ### 回滚
 
-`deploy.sh` 只备份、不提供一键回滚；恢复点路径打印在脚本结尾。手工回滚
-（**推导自 `deploy.sh:24-29` 的备份清单，未经目标机实操验证 —— [未验证]**）：
+`deploy.sh` 只备份、不提供一键回滚；恢复点路径打印在脚本结尾。**部署会在恢复点
+不完整时直接中止**（`deploy/check-recovery-point.sh` 逐个核对第 3 步要覆盖的每一个
+路径），所以打印出来的恢复点一定是齐的 —— 这一条由 `test_repo_hygiene` T16 从安装
+清单派生守着。
+
+恢复点的布局是**混合**的，因为备份分两批：
+
+```
+$B/pfand  $B/pfan  $B/pfanel.py  $B/pfan_platform.py  $B/pfan_core.py  $B/pfan.html
+   ↑ 5 个可执行件用 cp -a，落在 $B 根
+$B/etc/logrotate.d/pfan   $B/etc/pfan/fan-candidates.txt
+$B/usr/local/lib/pfan/platform.sh
+$B/opt/beszel/beszel_data/{index.html,styles.css,app.js,core.js,vendor/uPlot.*}
+   ↑ 其余用 cp -a --parents，保留完整路径
+```
+
+手工回滚（布局核对自恢复点 `/root/backups/pfan-deploy-<timestamp>` 的实际内容，
+并已在目标机实操验证 —— 不再是 [未验证]）：
 
 ```bash
-# 目标机上，B = deploy 结尾打印的 /root/backups/pfan-deploy-<ts>
-sudo cp -a "$B"/pfand "$B"/pfan "$B"/pfanel.py "$B"/pfan_platform.py "$B"/pfan_core.py /usr/local/bin/
-sudo systemctl restart pfanel pfand
+B=/root/backups/pfan-deploy-<ts>            # deploy 结尾打印的那个
+
+# ① 先核对恢复点真的齐（deploy 部署时跑过，这里可以再确认一次）
+sudo -n sh /tmp/pfan-deploy-*/deploy/check-recovery-point.sh "$B"   # 若暂存区已清，见下方注释
+#   EXPECTED N / PRESENT M 两者必须相等；不等就别回滚，先查为什么
+
+# ② 二进制
+sudo -n cp -a "$B"/pfand "$B"/pfan "$B"/pfanel.py "$B"/pfan_platform.py "$B"/pfan_core.py /usr/local/bin/
+
+# ③ 其余按 --parents 布局原样还原（这是 2026-10-09 之前漏掉的部分：
+#    面板 + logrotate 规则 + platform.sh + fan-candidates.txt）
+sudo -n cp -a "$B"/etc/.   /etc/
+sudo -n cp -a "$B"/usr/.   /usr/
+sudo -n cp -a "$B"/opt/.   /opt/
+
+# ④ 重启并复验
+sudo -n systemctl restart pfanctl pfand pfanel
 bash scripts/smoke.sh          # 回滚后必须全绿
 ```
 
-**恢复点里没有的东西**（核实自 `deploy.sh` 的备份清单）：
+⚠ **内核模块不在恢复点里**，而且 `deploy.sh` 也不碰它 —— 模块重建与重载是独立
+流程，见下一节。若一次部署同时换了模块，得单独按那节回退。
 
-- 面板 4 文件（`index.html/styles.css/app.js/core.js`）—— 只备份了旧单文件 `pfan.html`；
-  要回滚面板需从 git 历史检出字节再手动 `install`
-- `/etc/logrotate.d/pfan`、`/usr/local/lib/pfan/platform.sh`、`/etc/pfan/*`、内核模块
+⚠ 上面第 ① 步引用的 `check-recovery-point.sh` 位于 deploy 的暂存区，部署成功后会
+被清理。要留着就先 `cp` 一份出来，或者直接手工核对上面列出的 16 个路径。
 
 ## 日志
 

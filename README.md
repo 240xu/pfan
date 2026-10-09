@@ -54,18 +54,22 @@ bash scripts/deploy.sh
 
 脚本顺序（不得手拆子步骤）：本地 `ci.sh` → 目标机建恢复点
 `/root/backups/pfan-deploy-<时间戳>/` 并暂存新文件 → 传输安装（平台配置**只在缺失时**
-写入；运行单元 / 加载器 / logrotate / 面板 4 文件）→ 重启 `pfanel`、`pfand` →
+写入；运行单元 / 加载器 / logrotate / 面板 7 文件（4 主文件 + 3 vendor））→ 重启 `pfanel`、`pfand` →
 等待控制回路接管（最多 30s）→ 实机 `bash scripts/smoke.sh`。
 回滚点路径打印在脚本结尾。
 
 > ℹ️ 暂存名：`core/pfan` 与 `deploy/logrotate.d/pfan` 都叫 `pfan`，所以 logrotate 走
-> 独立的 `$STAGE/logrotate-pfan`。同名的后果曾是把 logrotate 规则装成
+> `$STAGE/deploy/logrotate.d/pfan`（`S()` 对 `deploy/` 开头的路径保留子目录），
+> CLI 另存为 `$STAGE/pfan-cli`。同名的后果曾是把 logrotate 规则装成
 > `/usr/local/bin/pfan`——现已修复，并由 `test_repo_hygiene` T7 钉住。
 
 
 **回滚**：把恢复点里的文件拷回原位 + `systemctl restart pfanel pfand`
 （**不要**顺手重启 `pfanctl` —— deploy 不动内核模块，见「服务」一节的覆盖边界），
-逐步骤见 `docs/OPERATIONS.md`（该流程由 `deploy.sh` 的备份清单推导，**未经目标机实操验证**）。
+逐步骤见 `docs/OPERATIONS.md`。该流程的恢复点布局核对自
+`/root/backups/pfan-deploy-<timestamp>` 的实际内容，并已在目标机实操验证。
+部署本身会在恢复点不完整时**中止**（`deploy/check-recovery-point.sh` 逐个核对第 3 步
+要覆盖的每一个路径）。
 
 ## Docs
 
