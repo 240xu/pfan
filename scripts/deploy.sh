@@ -21,7 +21,7 @@ bash scripts/ci.sh
 
 echo "== 1/5 目标机建恢复点 + 暂存新文件 =="
 # 备份目录在 /root 下 → 必须 sudo；暂存目录必须由 pfan 拥有，否则 scp 写不进去
-$R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan && \
+$R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt/beszel/beszel_data/vendor && \
     for f in /usr/local/bin/pfand /usr/local/bin/pfan /usr/local/bin/pfanel.py \
              /usr/local/bin/pfan_platform.py /usr/local/bin/pfan_core.py; do \
       [ -e \"\$f\" ] && sudo -n cp -a \"\$f\" '$B/'; done; \
@@ -38,6 +38,11 @@ $S platform/platform.conf.example platform/fan-candidates.txt    "pfan@$HOST:$ST
 # 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
 #（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
 $S deploy/logrotate.d/pfan                       "pfan@$HOST:$STAGE/logrotate-pfan"
+# vendor：app.js 以 ESM import 本地 /pfan-vendor-uplot.js。漏装会让【整个 app.js】
+# 不执行（连 boot() 都不跑），而现有冒烟只比对 4 个非 vendor 文件 → 三道闸门全照绿
+# （2026-10-08 专家审计 C1：这是比没有闸门更危险的静默失败）。
+$S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENSE \
+    "pfan@$HOST:$STAGE/"
 $R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
@@ -71,8 +76,12 @@ $R "set -e
     sudo -n install -m 644 $STAGE/styles.css /opt/beszel/beszel_data/styles.css
     sudo -n install -m 755 $STAGE/app.js     /opt/beszel/beszel_data/app.js
     sudo -n install -m 644 $STAGE/core.js    /opt/beszel/beszel_data/core.js
+    sudo -n mkdir -p /opt/beszel/beszel_data/vendor
+    sudo -n install -m 644 $STAGE/uPlot.esm.js   /opt/beszel/beszel_data/vendor/uPlot.esm.js
+    sudo -n install -m 644 $STAGE/uPlot.min.css  /opt/beszel/beszel_data/vendor/uPlot.min.css
+    sudo -n install -m 644 $STAGE/uPlot.LICENSE  /opt/beszel/beszel_data/vendor/uPlot.LICENSE
     rm -rf $STAGE
-    echo '  面板 4 文件已安装'"
+    echo '  面板 4 文件 + vendor 3 文件已安装'"
 
 echo "== 4/5 重启服务 =="
 $R "sudo -n systemctl restart pfanel && sleep 2 && sudo -n systemctl restart pfand"

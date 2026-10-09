@@ -89,7 +89,9 @@ code=${code:0:3}
 if [ "$code" = 200 ]; then ok "pfan.example.com/pfan = 200"; else bad "公网入口 = $code"; fi
 
 printf '\n=== 3b. 静态路由（拆分后的面板资源）===\n'
-for u in /pfan.css /pfan.js /pfan-core.js; do
+  # vendor 路由必须一起验：漏装时 app.js 的 ESM import 失败、整个面板不执行，
+  # 而其余 4 个 URL 仍是 200 —— 不验就是静默半死。
+  for u in /pfan.css /pfan.js /pfan-core.js /pfan-vendor-uplot.js /pfan-vendor-uplot.css; do
   c=$(timeout 20 curl -sS -o /dev/null -w '%{http_code}' --max-time 12 "$API$u" 2>/dev/null || echo 000)
   c=${c:0:3}
   if [ "$c" = 200 ]; then ok "$u = 200"; else bad "$u = $c（未部署？pfanel 仍是旧版）"; fi
@@ -131,6 +133,17 @@ for f in index.html styles.css app.js core.js; do
     bad "部署件 $f 已漂移: repo=$LH live=$RH（跑 bash scripts/deploy.sh 同步，勿只改一边）"
   fi
 done
+
+  # vendor 两件是 app.js 的 ESM 依赖，漂移=面板静默半死，一并比对
+  for f in uPlot.esm.js uPlot.min.css; do
+    LH=$(sha256sum "panel/vendor/$f" 2>/dev/null | awk '{print $1}')
+    RH=$(remote "sha256sum /opt/beszel/beszel_data/vendor/$f 2>/dev/null" 2>/dev/null | awk '{print $1}')
+    [ -n "$RH" ] || RH=$(remote "sudo -n sha256sum /opt/beszel/beszel_data/vendor/$f 2>/dev/null" 2>/dev/null | awk '{print $1}')
+    if [ -z "$LH" ]; then bad "仓库缺 panel/vendor/$f"
+    elif [ -z "$RH" ]; then bad "vendor 部署件读不到: $f（未部署？面板会全挂）"
+    elif [ "$LH" != "$RH" ]; then bad "vendor 部署件 $f 已漂移: repo=$LH live=$RH"
+    else ok "vendor $f 与仓库一致"; fi
+  done
 
 # 密钥扫描两边都做：仓库副本是开源泄露面，部署件是线上实际字节。
 # 拆分后 Token 占位符在 app.js（服务端 /pfan.js 注入），HTML 里不应有明文。

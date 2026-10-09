@@ -161,5 +161,32 @@ else
   ng "pre-push 里找不到 PFAN_SKIP_SMOKE 分支"
 fi
 
+sec "T11: vendored 资源必须被部署、被冒烟、被 CI 覆盖（漏一个=面板全挂且闸门全绿）"
+# 2026-10-08 专家审计 C1：panel/app.js 改成 import 本地 /pfan-vendor-uplot.js 之后，
+# deploy.sh 完全没有 transfer/install vendor/，smoke 也只校验 4 个非 vendor 文件 ——
+# 于是一次部署就会让 ESM import 500 → 整个 app.js 不执行（连 boot() 都不跑），
+# 而 deploy.sh / smoke.sh / pre-push 三道闸门【全部报绿】。这比没有闸门更危险。
+VF='panel/vendor/uPlot.esm.js'
+if grep -qF "$VF" scripts/deploy.sh; then
+  ok "deploy.sh 会传输并安装 vendor 资源"
+else
+  ng "deploy.sh 不碰 panel/vendor —— 部署后面板会全挂，而所有闸门仍然报绿"
+fi
+if grep -q 'beszel_data/vendor' scripts/deploy.sh; then
+  ok "deploy.sh 会在目标机创建 vendor 目录"
+else
+  ng "deploy.sh 没建 vendor 目录 —— 首台机器上 install 会失败"
+fi
+if grep -q 'pfan-vendor-uplot' scripts/smoke.sh; then
+  ok "smoke.sh 会验证 vendor 路由"
+else
+  ng "smoke.sh 不验 vendor 路由 —— 部署漏装时冒烟仍报绿"
+fi
+if grep -qF "$VF" scripts/ci.sh; then
+  ok "ci.sh 必需文件清单包含 vendor 资源"
+else
+  ng "ci.sh 不要求 vendor 资源存在 —— 误删后 CI 仍绿"
+fi
+
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"
