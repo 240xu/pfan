@@ -229,5 +229,52 @@ else
   ok "spec 里该声称已带限定/订正说明"
 fi
 
+echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
+# 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
+# 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"
+# 报成"确认没有 CORS 头"。而 SECURITY.md 正是拿这一段当"不发 CORS 头"的执行依据。
+# §2 处理同一个条件是对的（`|| { bad ...; }`），一个文件里两种写法只有一种有效。
+# == T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）==
+# 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
+# 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"
+# 报成"确认没有 CORS 头"。而 SECURITY.md 正是拿这一段当"不发 CORS 头"的执行依据。
+# §2 处理同一个条件是对的（`|| { bad ...; }`），一个文件里两种写法只有一种有效。
+#
+# 判据要简单到不会自己失效：只看 2b 段里有没有 `|| true`。我前两版正则分别死于
+# 「匹配不到跨行的 || true」和「curl 与 || 之间隔着管道，[^|]* 匹配不到」——
+# 两次都是"看着有守卫、实际看不见"，与它要防的缺陷同一类。
+# ⚠ 必须先剥注释：守卫的第一版把【我自己的说明注释】里那句
+# "原来的 `... || true` 把 curl 的退出码丢了" 当成了代码，于是修好后仍然误报红。
+# 判注释而不是判代码，是这个仓库已经栽过两次的坑（formatter 折行废掉 substring 守卫；
+# 注释含被测名导致守卫自我满足）。这里用行首是否为 # 来过滤 —— 块内注释都在行首。
+_corsblk=$(awk '/2b\./,/=== 3\./' scripts/smoke.sh | grep -vE '^[[:space:]]*#')
+if printf '%s' "$_corsblk" | grep -qF '|| true'; then
+  ng "smoke.sh 2b 的 curl 探测带 || true —— 连不上时会报 ok（fail-open）"
+else
+  ok "smoke.sh 2b 的探测不吞退出码"
+fi
+if printf '%s' "$_corsblk" | grep -qE '\|\|[[:space:]]*\{[^}]*bad|UNREACHABLE'; then
+  ok "smoke.sh 2b 对不可达有显式分支"
+else
+  ng "smoke.sh 2b 不可达时没有显式 bad 分支"
+fi
+echo "== T15: 只有【唯一】一个默认兜底，且不得用 cwd 相对路径读权威配置 =="
+# 同一份审计：EMERG 是从 config/pfand.conf.example 用【cwd 相对路径】读的，
+# 读不到就静默兜底 80。smoke.sh 从不改 cwd，于是从别的目录跑时读不到，
+# 应急满速的断言就变成对着一个硬编码常量断言 —— 而且是唯一一个 fail-open 的默认值
+# （同文件其它相对路径读取都会 bad 退出，只有它静默）。
+grep -qE '^cd "\$\(dirname "\$0"\)' scripts/smoke.sh \
+  && ok "smoke.sh 先 cd 到仓库根（相对路径读配置才成立）" \
+  || ng "smoke.sh 没有 cd 到仓库根 —— EMERG 等 cwd 相对读取会失效"
+# 光有 cd 不够：兜底值本身也必须是 fail-closed 的。变异证明把兜底改回 80 时
+# 上面那条守卫照样全绿。EMERG 是应急满速断言的唯一依据，兜底 80 = 断言转去对着
+# 一个硬编码常量，而 config/pfand.conf.cool-quiet 就是 EMERG=85。
+grep -qE 'EMERG_V=0;' scripts/smoke.sh \
+  && ok "EMERG 读不到时兜底 0（断言只会更严），不是静默兜底 80" \
+  || ng "EMERG 的兜底值不是 0 —— 读不到时应急断言会对着一个硬编码常量"
+grep -qE 'EMERG_V=80' scripts/smoke.sh \
+  && ng "smoke.sh 里还有静默的 EMERG_V=80 兜底" \
+  || ok "没有静默的 EMERG_V=80 兜底"
+echo
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"

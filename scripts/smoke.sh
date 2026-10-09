@@ -5,6 +5,11 @@
 # 严禁任何写操作（POST、set_level、set_curve、systemctl start|stop|restart、ufw allow|delete、rm）。
 # Termux 注意：/usr/bin/env 不存在，且无 /tmp 写权限 → 用 `bash scripts/smoke.sh` 调用。
 set -uo pipefail
+# 必须先 cd 到仓库根：本文件多处用【cwd 相对路径】读仓库文件（config/pfand.conf.example
+# 里的 EMERG、面板部署件、core/pfanctl/pfanctl.c）。smoke.sh 原来从不 cd，于是从别的目录
+# 运行时这些读取静默失败 —— 其中 EMERG 是唯一 fail-open 的默认值（读不到兜底 80），
+# 已一并改成 fail-closed（专家审计 C-2）。
+cd "$(dirname "$0")/.." || { echo "[FAIL] 进不去仓库根（cwd=$PWD）"; exit 1; }
 
 # fail-safe 蕴含式（TDD 可测，tests/shell/test_guards.sh 抽取本变量）
 # 语义：(温度读不到 或 温度>=EMERG) 是危险条件 ⇒ 必须满速；否则放行。
@@ -61,7 +66,10 @@ if [ -n "$j" ]; then
     bad "level 越界: $(echo "$j" | jq -c .level 2>/dev/null)"
   fi
   EMERG_V=$(grep -E '^EMERG=' config/pfand.conf.example 2>/dev/null | head -1 | cut -d= -f2)
-  [ -n "${EMERG_V:-}" ] || EMERG_V=80
+  # 读不到就必须【报错】而不是兜底：兜底 80 会让应急满速断言转去对着一个硬编码常量
+# 断言，EMERG 一变就静默失效（config/pfand.conf.cool-quiet 就是 EMERG=85）。
+# 兜底 0 而不是 80：这样后面的断言只会更严，不会更松（专家审计 C-2）。
+[ -n "${EMERG_V:-}" ] || { bad "读不到 config/pfand.conf.example 的 EMERG（cwd=$PWD）"; EMERG_V=0; }
   if echo "$j" | jq -e --argjson emerg "$EMERG_V" "$GUARD_FAILSAFE_JQ" >/dev/null 2>&1; then
     ok "fail-safe：温度>=EMERG($EMERG_V) 或读不到 ⇒ 满速"
   else
@@ -72,11 +80,18 @@ fi
 printf '\n=== 2b. 读接口不得发通配 CORS（②⑦）===\n'
 # 必须用 GET：旧版 pfanel 未实现 do_HEAD，HEAD 会 501 且根本不进 _send，
 # 拿它检查会得到"没有这个头"的假阳性（2026-10-06 实测踩过）。
-acao=$(timeout 30 curl -sS -D - -o /dev/null --max-time 20 "$API/api/now" 2>/dev/null \
-       | tr -d '\r' | grep -i '^access-control-allow-origin:' || true)
+# ⚠ 这里必须区分【三态】：有 CORS 头 / 确认没有 / 【没连上】。
+# 原来的 `... || true` 把 curl 的退出码丢了，于是超时或连接断开时 acao 为空，
+# 而 `[ -z "$acao" ]` 把"根本没收到响应"报成"确认没有这个头" —— SECURITY.md
+# 正是拿这一段当"不发 CORS 头"的执行依据，所以它必须 fail-closed（专家审计 C-1）。
+_hdrs=$(timeout 30 curl -sS -D - -o /dev/null --max-time 20 "$API/api/now" 2>/dev/null) \
+  || { bad "CORS 探测不可达（$API）—— 无法判定，不当作通过"; acao=__UNREACHABLE__; }
+acao=$(printf '%s' "${_hdrs:-}" | tr -d '\r' | grep -i '^access-control-allow-origin:')
 # 只允许【完全没有】这个头。反射型 ACAO（把请求 Origin 回显回去）对浏览器来说
 # 与通配等价，之前的 "非通配就算 ok" 分支会把它放过去。
-if [ -z "$acao" ]; then
+if [ "$acao" = "__UNREACHABLE__" ]; then
+  :   # bad 已在上面记过，这里不能再当成"没有这个头"
+elif [ -z "$acao" ]; then
   ok "无 Access-Control-Allow-Origin（同源面板不需要 CORS）"
 else
   bad "发了 CORS 头（反射型与通配同样危险）: $acao"

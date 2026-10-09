@@ -27,12 +27,30 @@ done
 # smoke.sh 只读守卫 —— 静态断言代码行无写操作（复审 I3：之前只在 Task 4 手跑过一次）
 step "smoke.sh read-only guard"
 SMOKE_FORBIDDEN='POST|set_level|set_curve|rm -|ufw (allow|delete|reset)|systemctl (start|stop|restart)|> */etc/'
-if [ ! -f scripts/smoke.sh ]; then
-  echo "MISSING: scripts/smoke.sh" >&2; rc=1
-elif grep -vE '^[[:space:]]*#' scripts/smoke.sh | grep -nE "$SMOKE_FORBIDDEN" > "$HOME/.cache/pfan-smoke-guard" 2>/dev/null; then
-  echo "smoke.sh 含写操作:" >&2; cat "$HOME/.cache/pfan-smoke-guard" >&2; rc=1
+# 必须覆盖 smoke.sh 【以及它 source 的所有文件】：
+#   变异证明 —— 往 scripts/smoke-lib.sh 里追加
+#   `sudo -n rm -f /etc/pfand.conf` 与 `curl -X POST`，smoke.sh 一行没动，
+#   旧守卫照样报 "ok: smoke.sh 代码行无写操作"，零个 CI 失败。
+# 而 smoke.sh:23 确实 `. "$(dirname "$0")/smoke-lib.sh"`。
+# 提取方式：取 source/. 那一行的【最后一个引号段】。不试图解析路径表达式
+#   （`. "$(dirname "$0")/smoke-lib.sh"` 里第一个引号段是 "$0"，解析它只会得到 scripts/$0）。
+SMOKE_FILES=$(grep -E '^[[:space:]]*(\.|[[:space:]]source)[[:space:]]' scripts/smoke.sh \
+             | grep -oE '"[^"]+"' | tail -1 | tr -d '"' | sed 's|.*/|scripts/|')
+SMOKE_FILES="scripts/smoke.sh $SMOKE_FILES"
+if [ -z "$(echo "$SMOKE_FILES" | tr ' ' '\n' | grep -c .)" ]; then
+  echo "MISSING: smoke 文件集解析为空" >&2; rc=1
 else
-  echo "ok: smoke.sh 代码行无写操作"
+  # 不落临时文件：原来的 `> "$HOME/.cache/pfan-smoke-guard"` 一旦重定向失败
+  # （HOME 指向不存在的目录即触发），复合命令非零 -> 走 else -> 报 ok���自我击穿）。
+  _hits=$(for f in $SMOKE_FILES; do
+            [ -f "$f" ] || { echo "$f 不存在" >&2; continue; }
+            grep -vE '^[[:space:]]*#' "$f" | grep -nE "$SMOKE_FORBIDDEN" | sed "s|^|$f:|"
+          done)
+  if [ -n "$_hits" ]; then
+    echo "smoke 文件含写操作（$SMOKE_FILES）:" >&2; echo "$_hits" >&2; rc=1
+  else
+    echo "ok: smoke 文件代码行无写操作（$SMOKE_FILES）"
+  fi
 fi
 
 step "shellcheck (-S error)"
