@@ -832,7 +832,12 @@ describe("V3: gaugeArc 几何", () => {
     expect(nums[nums.length - 2]).toBeCloseTo(50 + 40 * Math.cos(390 * Math.PI / 180), 3);
     expect(nums[nums.length - 1]).toBeCloseTo(50 - 40 * Math.sin(390 * Math.PI / 180), 3);
     expect(d.largeArc).toBe(1);        // 240° > 180° → large-arc-flag=1
-    expect(d.sweepFlag).toBe(1);
+    // ⚠ 这条断言 2026-10-09 被推翻：原为 1。polar() 用 cy - r*sin 取反了 y，
+    // deg 增大在屏幕上就是逆时针，而 sweep-flag=1 表示顺时针 —— 浏览器于是把弧解析到
+    // 另一个圆上（圆心从 (50,46) 变成 (50,≈10)），浏览器像素普查实测：74 行里只有
+    // 0~32 行被画，48~73 行空白；getPointAtLength 走的是 10 点→12 点→2 点。
+    // 同一个 describe 里"写死 1 的话半圆表盘会画成反向大弧"的注释本就与该断言冲突。
+    expect(d.sweepFlag).toBe(0);
   });
 
   test("半圈及以下 large-arc-flag=0（>180 的判定不能写死为 1）", async () => {
@@ -962,5 +967,57 @@ describe("⑰ 语义修正：cached 不等于过期（API 查询本就总走缓�
     const { statusText } = await import("../../panel/core.js");
     expect(statusText({ cached: true, age: 3, temp: 50, level: 30 }, 20))
       .not.toMatch(/缓存快照/);
+  });
+});
+
+describe("仪表弧：极性 + viewBox 裁切（专家审计 CRITICAL 2，浏览器像素普查证实的）", () => {
+  // polar() 用 cy - r*sin（数学惯例取反），所以屏幕上 deg 增大是【逆时针】。
+  // 但 gaugePath 把 sweepFlag 硬编码成 1 = 顺时针 —— 浏览器于是把弧解析到另一个圆上，
+  // 圆心变成 (50, ≈10) 而不是 (50, 46)：实测只有第 0~32 行被画，第 48~73 行空白，
+  // getPointAtLength 走的是 10 点钟 → 12 点 → 2 点钟。
+  test("sweepFlag 必须是 0（polar 取反了 y，deg 增大=逆时针）", async () => {
+    const { gaugePath } = await import("../../panel/core.js");
+    const g = gaugePath({ start: 210, sweep: 120, cx: 50, cy: 46, r: 36 });
+    expect(g.sweepFlag).toBe(0);
+  });
+  // 第二个独立缺陷：即便 sweepFlag 修对，240° 的环在 cy=46 r=36 stroke=9 下
+  // 需要 y ∈ [5.5, 86.5]，而 viewBox 只到 74 → 底部约 12.5 个单位被裁掉。
+  test("viewBox 必须容得下整���环（含 stroke）", async () => {
+    const { gaugeMarkup } = await import("../../panel/core.js");
+    const svg = gaugeMarkup({ id: "g1", label: "t", value: 52, min: 0, max: 105 });
+    const m = svg.match(/viewBox="0 0 (\d+) (\d+)"/);
+    expect(m).toBeTruthy();
+    const [, , vbH] = m;
+    const cy = 46, r = 36, sw = 9;
+    const bottom = cy + r + sw / 2;          // 下缘（含描边一半）
+    const top = cy - r - sw / 2;
+    expect(Number(vbH)).toBeGreaterThanOrEqual(bottom - 0.01);
+    expect(top).toBeGreaterThanOrEqual(0);   // 上缘不能是负数
+  });
+});
+
+describe("esc 必须是真正的 HTML 转义器（专家审计 IMPORTANT 3）", () => {
+  // 原实现是 `String(s == null ? "" : s)` —— 纯字符串化，不转义任何一个字符。
+  // 但它被接进了 4 个 innerHTML 槽位，注释写着"一行 esc() 让这条缝不依赖服务端恰好
+  // 没写错"，测试 describe 也叫"漏掉的 XSS 缝"。名字与注释都在声称一个它并不提供的保证。
+  test("转义 < > & \" '", async () => {
+    const { esc } = await import("../../panel/core.js");
+    const out = esc(`<img src=x onerror="alert(1)"> & 'x'`);
+    expect(out).not.toMatch(/[<>]/);
+    expect(out).toMatch(/&lt;/);
+    expect(out).toMatch(/&gt;/);
+    expect(out).toMatch(/&amp;/);
+    expect(out).toMatch(/&quot;/);
+    expect(out).toMatch(/&#39;/);
+  });
+  test("已存在的实体不会被二次编码成 &amp;lt;", async () => {
+    const { esc } = await import("../../panel/core.js");
+    expect(esc("a<b")).toBe("a&lt;b");
+  });
+  test("null/undefined 仍返回空串", async () => {
+    const { esc } = await import("../../panel/core.js");
+    expect(esc(null)).toBe("");
+    expect(esc(undefined)).toBe("");
+    expect(esc(0)).toBe("0");
   });
 });

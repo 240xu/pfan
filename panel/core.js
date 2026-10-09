@@ -1,9 +1,16 @@
 // 纯逻辑：无 DOM、无网络、无副作用 —— 可被 vitest 直接导入。
 // app.js 负责把这些结果画出来；这里只做计算/格式化。
 
-/** 空值安全的字符串化（原 app.js 的 esc） */
+/** HTML 转义 + 空值安全。
+ *  ⚠ 2026-10-09 前它只是 `String(s == null ? "" : s)` —— 纯字符串化，一个字符都不转义，
+ *    却被接进 4 个 innerHTML 槽位，注释与测试 describe 都在声称它是一条 XSS 防线
+ *    （专家审计 IMPORTANT 3：浏览器实测 `<img src=x onerror=…>` 经它后成了活的 img 元素）。
+ *    现在它兑现这个名字：& 必须先替换，否则 &lt; 会被二次编码成 &amp;lt;。
+ *    可用性不变 —— 服务端目前下发的值（曲线名、白名单键）本来就不含这些字符。
+ */
+const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 export function esc(s) {
-  return String(s == null ? "" : s);
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 }
 
 /** 空值安全的温度显示：读不到就是 "--"，否则原样返回（不擅自四舍五入） */
@@ -254,10 +261,14 @@ export function gaugePath(g) {
   const [x1, y1] = polar(cx, cy, r, a0 + s);
   const circumference = 2 * Math.PI * Math.abs(r) * (Math.abs(s) / 360);
   return {
-    path: `M ${x0.toFixed(3)} ${y0.toFixed(3)} A ${r} ${r} 0 ${Math.abs(s) > 180 ? 1 : 0} 1 ${x1.toFixed(3)} ${y1.toFixed(3)}`,
+    // sweepFlag 必须是 0：polar() 用 cy - r*sin 取反了 y，deg 增大在屏幕上=逆时针，
+    // 而 sweep-flag=1 表示顺时针。写 1 时浏览器把弧解析到【另一个】圆上（圆心从
+    // (50,46) 变成 (50,≈10)），实测只有顶部 32 行被画、底部 26 行空白
+    // （专家审计 CRITICAL 2，像素普查 + getPointAtLength 追踪）。
+    path: `M ${x0.toFixed(3)} ${y0.toFixed(3)} A ${r} ${r} 0 ${Math.abs(s) > 180 ? 1 : 0} 0 ${x1.toFixed(3)} ${y1.toFixed(3)}`,
     circumference,
     largeArc: Math.abs(s) > 180 ? 1 : 0,
-    sweepFlag: 1,
+    sweepFlag: 0,
   };
 }
 
@@ -325,13 +336,13 @@ export function gaugeMarkup(o) {
   const g = gaugeArc({ cx: 50, cy: 46, r: 36, sweep: 240, start: 150,
                        value: o.value, min: o.min, max: o.max });
   if (!g) {
-    return `<svg class="g-arc" viewBox="0 0 100 74" width="${o.size || 96}" role="img" ` +
+    return `<svg class="g-arc" viewBox="0 0 100 92" width="${o.size || 96}" role="img" ` +
       `aria-label="${esc(o.label)} 无数据">` +
       `<path d="${gaugePath({ cx: 50, cy: 46, r: 36, sweep: 240, start: 150 }).path}" ` +
       `fill="none" stroke="#21262d" stroke-width="9" stroke-linecap="round"/>` +
       `<text x="50" y="48" text-anchor="middle" font-size="15" fill="#484f58">--</text></svg>`;
   }
-  return `<svg class="g-arc" viewBox="0 0 100 74" width="${o.size || 96}" role="img" ` +
+  return `<svg class="g-arc" viewBox="0 0 100 92" width="${o.size || 96}" role="img" ` +
     `aria-label="${esc(o.label)} ${esc(valueText(o.value))}${esc(o.unit || "")}">` +
     `<path d="${g.path}" fill="none" stroke="#21262d" stroke-width="9" stroke-linecap="round"/>` +
     `<path d="${g.path}" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round" ` +

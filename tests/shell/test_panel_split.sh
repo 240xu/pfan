@@ -55,4 +55,11 @@ fi
 echo "== T6: 旧的单文件不应残留 =="
 [ -f panel/pfanpanel.html ] && ng "panel/pfanpanel.html 仍在（未拆干净）" || ok "旧单文件已移除"
 
+echo "== T4: 图表高度必须取自父容器，不能取自 uPlot 自己（否则 h=h+32 无界增长）=="
+# 专家审计 CRITICAL 1（浏览器实测）：sizeOf 量的是 #ch1，而 #ch1 的高度是 uPlot 的
+# .u-wrap 高度【加上】32px 的 .u-legend（.u-wrap 的兄弟节点）。把这个测量值原样喂回
+# uPlot.setSize 就是 h = h + 32 —— 没有不动点。实测 #ch1 长到 11744px、页面 7658px。
+grep -qE 'parentElement' panel/app.js && ok "尺寸测量走 parentElement（.chartbox 固定高）" || ng "尺寸测量未走 parentElement —— h=h+32 无界增长"
+grep -qE 'el\.parentElement \|\| el' panel/app.js && ok "sizeOf 明确取父元素矩形" || ng "sizeOf 没明确取父元素矩形"
+echo
 echo "test_panel_split: fails=$fails"; exit "$fails"

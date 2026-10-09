@@ -210,21 +210,38 @@ const T_STAMP = "YYYY-MM-DD HH:mm:ss";
  * 旧版 Chart.js 用 responsive:true 自动处理这件事，这里必须手动补。
  * 做法：构造前把宿主盒子的实测尺寸喂进去，并挂 ResizeObserver 持续同步
  * （ResizeObserver 触发时会回调一次初始尺寸，不会重复损失首帧）。 */
+// ⚠ 必须量【父容器】.chartbox，不能量 #chN 自己。
+// #chN 的高度 = uPlot 的 .u-wrap 高度 + 32px 的 .u-legend（.u-wrap 的兄弟节点）。
+// 把这个值原样喂回 u.setSize 就是 h = h + 32 —— 没有不动点，图表无界增高。
+// （专家审计 CRITICAL 1，浏览器实测：#ch1 长到 11744px、整页 7658px，
+//  把 #ch1 钉成 220px 后 4 次采样全部稳定在 220px。）
+const CHART_H = 220;
 function sizeOf(el) {
-  const b = el.getBoundingClientRect();
-  return { width: Math.max(0, b.width), height: Math.max(0, b.height || 220) };
+  const box = el.parentElement || el;   // .chartbox 才是由 CSS 定高、且不含图例的元素
+  const b = box.getBoundingClientRect();
+  return {
+    width: Math.max(0, b.width || el.getBoundingClientRect().width),
+    height: Math.max(0, b.height || CHART_H),
+  };
 }
 function fitChart(el, u) {
   if (!el || !u) return;
   const s = sizeOf(el);
+  let last = s;
   if (s.width > 0 && s.height > 0) u.setSize(s);
   // 面板后台标签/窗口缩放都要跟随；ResizeObserver 不可用时（老浏览器）退回
   // 一次性 fitting —— 图不会跟着变但不至于塌掉
   if (typeof ResizeObserver === "function") {
+    // 观察父容器（.chartbox），不是 #chN —— 否则 setSize 又会触发自己的观察者
     new ResizeObserver(() => {
       const t = sizeOf(el);
-      if (t.width > 0 && t.height > 0) u.setSize(t);
-    }).observe(el);
+      if (t.width <= 0 || t.height <= 0) return;
+      // 反馈回环的护栏：只把【不同于上次请求】的尺寸喂回去。
+      // 没有这一条，任何"测量对象包含 uPlot 自身高度"的改动都会重新变成无界增长。
+      if (last.w === t.width && last.h === t.height) return;
+      last = t;
+      u.setSize(t);
+    }).observe(el.parentElement || el);
   }
 }
 function mount(elId, opts, data) {
