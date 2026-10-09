@@ -14,8 +14,29 @@ HOST="${PFAN_HOST:-192.168.1.10}"
 API_BASE="${PFAN_API_BASE:-http://$HOST:8789}"
 KEY="$HOME/.ssh/pfan_deploy_key"
 SSHOPT=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15)
-R="ssh ${SSHOPT[@]} pfan@$HOST"
-S="scp ${SSHOPT[@]}"
+# 目标机只能经 Cloudflare SSH 隧道到达时，cloudflared access 会出现 banner 超时抖动
+# （实测同一分钟内单条探测也可能超时）。一次抖动不该让整次部署失败，也不能靠"重跑
+# 整个 deploy"——那会在传输中途反复重来。所以给每条 ssh/scp 加有界重试。
+SSH_RETRY="${PFAN_SSH_RETRY:-4}"
+_retry(){ # _retry <描述> <命令...>
+  local what="$1"; shift
+  local n=1
+  while :; do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    # 需要输出的调用（scp/带 tee 的）单独处理：这里只用于探测连通性
+    if [ "$n" -ge "$SSH_RETRY" ]; then
+      echo "[FAIL] $what 连续 $n 次失败（最后一条在下方）" >&2
+      return 1
+    fi
+    echo "  …$what 第 $n 次失败，重试（隧道抖动？）" >&2
+    n=$((n+1)); sleep $((n*3))
+  done
+}
+# R/S：每次调用先探一次连通性，隧道抖动就重试（有界）。探活用 -o ConnectTimeout=8。
+R(){ _retry "ssh $HOST" ssh "${SSHOPT[@]}" -o ConnectTimeout=8 pfan@"$HOST" true \
+      && ssh "${SSHOPT[@]}" pfan@"$HOST" "$@"; }
+S(){ _retry "scp $HOST" scp "${SSHOPT[@]}" -o ConnectTimeout=8 pfan@"$HOST" true \
+      && scp "${SSHOPT[@]}" pfan@"$HOST" "$@"; }
 TS=$(date +%Y%m%d-%H%M%S)
 B="/root/backups/pfan-deploy-$TS"
 STAGE="/tmp/pfan-deploy-$$"
