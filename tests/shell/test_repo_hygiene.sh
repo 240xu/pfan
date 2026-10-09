@@ -149,5 +149,17 @@ else
   ng "smoke.sh 不检测 .ko 是否过期 —— 改了源码却没重建时无人报警"
 fi
 
+sec "T10: pre-push 的跳过分支不得用 `&&` 链（set -e 下条件为假 = 无理由拒推）"
+# 2026-10-08 实测：机器不可达时，`[ "${PFAN_SKIP_SMOKE:-0}" = 1 ] && echo ...` 在
+# set -e 下返回 1，整个钩子以 rc=1 退出 —— 日志恰好停在上一行，push 被无理由拒绝。
+# 正确写法是 if。守卫只断言形态，不执行钩子（那要连机器）。
+if grep -qE '^\s*\[ "\$\{PFAN_SKIP_SMOKE:-0\}" = 1 \] &&' hooks/pre-push; then
+  ng "pre-push 跳过分支仍用 [ ... ] && 链 —— set -e 下条件为假会无理由拒绝 push"
+elif grep -q 'PFAN_SKIP_SMOKE' hooks/pre-push; then
+  ok "pre-push 跳过分支用 if 而非 && 链（机器不可达时可正常放行）"
+else
+  ng "pre-push 里找不到 PFAN_SKIP_SMOKE 分支"
+fi
+
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"

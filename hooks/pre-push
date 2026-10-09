@@ -20,5 +20,10 @@ else
   echo "pre-push: smoke 未运行 —— 原因如下（ci 仍强制）："
   echo "$probe_err" | sed 's/^/    /'
   echo "    如需在无该密钥的机器上有意跳过，显式设置 PFAN_SKIP_SMOKE=1"
-  [ "${PFAN_SKIP_SMOKE:-0}" = 1 ] && echo "    (PFAN_SKIP_SMOKE=1 已设置)"
+  # ⚠ 这里【必须】用 if，不能用 `[ ... ] && echo`：
+  # 在 set -e 下，条件为假的 `&&` 链返回 1，会让整个钩子以 rc=1 退出 ——
+  # 表现是"机器不可达时 push 无理由被拒"，日志正好停在上一行（2026-10-08 实测）。
+  if [ "${PFAN_SKIP_SMOKE:-0}" = 1 ]; then
+    echo "    (PFAN_SKIP_SMOKE=1 已设置)"
+  fi
 fi
