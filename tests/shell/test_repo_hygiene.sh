@@ -106,10 +106,19 @@ else
 fi
 
 sec "T6: smoke 第 5 段必须比对真实部署件（线上服务 /opt/beszel/beszel_data，不是仓库副本）"
-if grep -qF 'beszel_data' scripts/smoke.sh; then
-  ok "smoke.sh 涉及 /opt/beszel/beszel_data 部署件"
+# ⚠ 不能只判 'beszel_data' 这个词出现过：变异证明把第 5 段整个比对删掉、
+# 注释里留着 beszel_data，T6 照样绿。判据必须是【真的执行了 sha256 比对】。
+_s5=$(awk '/部署件比对|^printf.*5\./,/^printf.*6\./' scripts/smoke.sh)
+if [ -z "$_s5" ]; then _s5=$(awk '/beszel_data/{f=1} f' scripts/smoke.sh | head -40); fi
+if printf '%s' "$_s5" | grep -vE '^[[:space:]]*#' | grep -qE 'sha256sum .*beszel_data'; then
+  ok "smoke.sh 对 beszel_data 真的执行 sha256 比对"
 else
-  ng "smoke.sh 第 5 段只扫仓库 panel/ 副本 —— 测的不是线上真正服务的字节"
+  ng "smoke.sh 没有对 beszel_data 执行 sha256 比对 —— 比对被删了也会报绿"
+fi
+if printf '%s' "$_s5" | grep -qE 'beszel_data/\$f|beszel_data/[a-z]+\.(html|js|css)'; then
+  ok "第 5 段比对的是线上文件（逐个文件名）"
+else
+  ng "第 5 段没有逐个比对线上文件"
 fi
 
 
@@ -133,11 +142,15 @@ fi
 sec "T8: pre-push 必须接住 ssh 探测的退出码，否则跳过分支是死代码"
 # set -e 下命令替换赋值的退出码就是 ssh 的退出码：机器不可达时钩子在这里直接中止
 # （rc=255），下面"打印原因 + 接受 PFAN_SKIP_SMOKE"一行都不会执行。
-if grep -q 'probe_rc=' hooks/pre-push; then
-  ok "pre-push 用 probe_rc 显式接住 ssh 退出码"
+# ⚠ 不能只判 'probe_rc=' 出现过：变异证明把 `|| probe_rc=$?` 删掉、只留
+# `probe_rc=0` 这行初始化，T8 照样绿 —— 而初始化恰恰是它不该认的东西。
+if grep -qE '\|\| *probe_rc=\$\?' hooks/pre-push; then
+  ok "pre-push 用 '|| probe_rc=\$?' 接住 ssh 退出码"
 else
-  ng "pre-push 未接住 ssh 退出码 —— 不可达时原因不打印、PFAN_SKIP_SMOKE 无效"
+  ng "pre-push 没有捕获 ssh 退出码（'|| probe_rc=\$?'）—— 不可达时原因不打印、PFAN_SKIP_SMOKE 无效"
 fi
+_prc=$(grep -c 'probe_rc' hooks/pre-push 2>/dev/null || echo 0)
+[ "$_prc" -ge 2 ] || ng "pre-push 里 probe_rc 只出现 $_prc 次 —— 捕获那条被删了"
 
 sec "T9: smoke 必须比对内核模块源码（deploy.sh 不同步 /opt/pfanctl，别处无人看管）"
 if grep -qF 'core/pfanctl/pfanctl.c' scripts/smoke.sh && grep -qF '/opt/pfanctl/pfanctl.c' scripts/smoke.sh; then
@@ -169,26 +182,52 @@ sec "T11: vendored 资源必须被部署、被冒烟、被 CI 覆盖（漏一个
 # 于是一次部署就会让 ESM import 500 → 整个 app.js 不执行（连 boot() 都不跑），
 # 而 deploy.sh / smoke.sh / pre-push 三道闸门【全部报绿】。这比没有闸门更危险。
 VF='panel/vendor/uPlot.esm.js'
-if grep -qF "$VF" scripts/deploy.sh; then
-  ok "deploy.sh 会传输并安装 vendor 资源"
+# ⚠ 四条子检查全部从「字符串出现过」改成「结构上真的做了那件事」。审计 I-5 的变异：
+#   把 deploy.sh 里 vendor 的三条 install 全删掉（保留备份/传输/注释），四条子检查
+#   全部照绿 —— 因为它们判的是路径字符串出现过，而备份清单里也有这些路径。
+# 判据一：vendor 必须出现在【传输行】或【install 行】上，而不是任意位置。
+if grep -E "^[[:space:]]*(S |sudo -n install )" scripts/deploy.sh | grep -qF "$VF" \
+   || grep -E "^S panel/vendor/" scripts/deploy.sh >/dev/null 2>&1; then
+  ok "deploy.sh 在【传输/install 行】上处理 vendor 资源"
 else
-  ng "deploy.sh 不碰 panel/vendor —— 部署后面板会全挂，而所有闸门仍然报绿"
+  ng "vendor 只出现在备份清单或注释里，没有被真正传输/安装 —— 部署后面板会全挂而闸门全绿"
 fi
-if grep -q 'beszel_data/vendor' scripts/deploy.sh; then
-  ok "deploy.sh 会在目标机创建 vendor 目录"
+# 判据二：必须有 install 到 vendor 目录（备份 ≠ 安装）
+if grep -E 'install .*beszel_data/vendor/' scripts/deploy.sh | grep -q .; then
+  ok "deploy.sh 把 vendor 文件 install 到 beszel_data/vendor"
+else
+  ng "deploy.sh 没有 install 到 vendor 目录 —— 只有备份，线上仍然没有这个文件"
+fi
+# 判据三：必须真的 mkdir（首台机器上目录不存在时 install 会失败）
+if grep -E 'mkdir .*beszel_data(/vendor)?' scripts/deploy.sh | grep -q .; then
+  ok "deploy.sh 创建 vendor 目录"
 else
   ng "deploy.sh 没建 vendor 目录 —— 首台机器上 install 会失败"
 fi
-if grep -q 'pfan-vendor-uplot' scripts/smoke.sh; then
-  ok "smoke.sh 会验证 vendor 路由"
+# 判据四：smoke 必须把 vendor 路由放进【被遍历的 URL 列表】。注意实际形态是
+# `for u in /pfan.css ... /pfan-vendor-uplot.js ...` —— 路径在 for 的列表里，
+# 请求由循环体内的 curl 发出。所以判据是"出现在 for 列表中"，不是"同行有 curl"。
+_vurl=$(grep -E '^[[:space:]]*for [a-z_]+ in .*pfan-vendor-uplot' scripts/smoke.sh)
+if [ -n "$_vurl" ]; then
+  ok "smoke.sh 把 vendor 路由放进被遍历的 URL 列表"
 else
-  ng "smoke.sh 不验 vendor 路由 —— 部署漏装时冒烟仍报绿"
+  ng "smoke.sh 没把 vendor 路由放进遍历列表 —— 部署漏装时冒烟仍报绿"
 fi
-if grep -qF "$VF" scripts/ci.sh; then
-  ok "ci.sh 必需文件清单包含 vendor 资源"
+# 且循环体里真的发了请求（否则列表里的路径是摆设）
+if grep -E 'curl .*\$u' scripts/smoke.sh | grep -q .; then
+  ok "smoke.sh 对列表里的每个 URL 真的发请求"
 else
-  ng "ci.sh 不要求 vendor 资源存在 —— 误删后 CI 仍绿"
+  ng "smoke.sh 的遍历列表里有 vendor 路由但没有 curl \$u —— 根本没请求"
 fi
+# 判据五：ci 的必需文件清单要【逐个列出】三个 vendor 文件（漏一个就少一个守卫）
+_vmiss=""
+for _v in uPlot.esm.js uPlot.min.css uPlot.LICENSE; do
+  grep -qF "$_v" scripts/ci.sh || _vmiss="$_vmiss $_v"
+done
+[ -z "$_vmiss" ] \
+  && ok "ci.sh 必需清单含全部三个 vendor 文件" \
+  || ng "ci.sh 必需清单缺：$_vmiss"
+
 
 sec "T12: 恢复点必须覆盖第 3 步覆盖的每一个路径（否则半途失败不可回滚）"
 # 专家审计 C2：恢复点原本只备 5 个 /usr/local/bin/* 二进制，而第 3 步还会覆盖
