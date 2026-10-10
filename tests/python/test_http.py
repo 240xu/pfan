@@ -464,3 +464,71 @@ def test_free_curve_must_not_break_persisted_state_restore():
     assert final and int(final.group(1)) == 40, (
         "free 曲线还原后最终档位应是已存档的 40，实际=%r（0 = 停转）" % (writes[-1],)
     )
+
+
+# ---------------- 专家审计 C2 续：level=0 / level 缺失必须回落，而不是留停转 ----------------
+# 上一条只覆盖 level=40（有意的非零档位）。缺省值那一支 —— level 压根是 0，
+# 也就是从没按过档位按钮的【默认状态】—— 旧实现是掉进"无可恢复"的。
+
+def test_persisted_state_with_zero_level_falls_back_not_stops():
+    """level=0 不是"有意的 0"，而是"从没按过档位按钮"的默认状态（pfanel.py:79）。
+
+    set_level 把档位钳在 >=1，所以 0 永远不是一次有意的选择。旧实现
+    `if st.get("level"):` 把 0 当成"无可恢复"，于是 free 曲线在每次 pfanel
+    启动（含每次 deploy.sh）之后都把风扇留在 _FSL 1 0 —— 而 s0i3 下 0 就是停转。
+    """
+    pfanel._APPLIED = False
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    dev = os.environ["PFAN_DEV"]
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free", "level": 0}, fh)
+    open(dev, "w").close()
+    import builtins as _b
+    import subprocess as _sp
+    _real_run, _real_open = _sp.run, _b.open
+    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(os.path.join(os.path.dirname(dev), "pfanel.log"), "a")
+        if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+    try:
+        pfanel.apply_persisted_state()
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel._APPLIED = False
+    writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
+              if "_FSL" in l]
+    assert writes, "free 曲线一个 _FSL 都没写 —— 设备停在先前状态"
+    import re as _re
+    last = _re.findall(r"_FSL 1 (\d+)", writes[-1])
+    assert last and int(last[-1]) >= 25, (
+        "level=0 时最终档位是 %r，必须回落到 >=25 的安全下限而不是 0" % (last[-1] if last else None,)
+    )
+
+
+def test_persisted_state_with_missing_level_falls_back_too():
+    """state 里根本没有 level 键 —— 走 .get() 的 None 分支，与 0 同类。"""
+    pfanel._APPLIED = False
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    dev = os.environ["PFAN_DEV"]
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free"}, fh)          # 故意没有 level
+    open(dev, "w").close()
+    import builtins as _b
+    import subprocess as _sp
+    import re as _re
+    _real_run, _real_open = _sp.run, _b.open
+    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(os.path.join(os.path.dirname(dev), "pfanel.log"), "a")
+        if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+    try:
+        pfanel.apply_persisted_state()
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel._APPLIED = False
+    writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
+              if "_FSL" in l]
+    last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
+    assert last and int(last[-1]) >= 25, "缺 level 键时也必须回落，而不是留下停转"

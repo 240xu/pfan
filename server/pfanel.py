@@ -68,6 +68,9 @@ PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", _PLAT.get("PANEL_DIR", "/opt/beszel
 VENDOR_DIR = os.environ.get("PFAN_VENDOR_DIR", os.path.join(PANEL_DIR, "vendor"))
 CURVE_FILE = os.environ.get("PFAN_CURVE_FILE", "/var/lib/pfanel/curve.state")
 GUARD_TEMP = 82  # 看门狗阈值：quiet 下超过此温度自动回退（TjMax=100）
+# 回落下限：pfan_core.FPS 表最低档（表只有一份，见 :176），也是 set_curve("auto")
+# 交回失败时的兜底值。0 在 ACPI 里的含义是停转，不是"最低档"。
+MIN_SAFE_LEVEL = 25
 
 
 def get_state():
@@ -394,6 +397,10 @@ def apply_persisted_state():
     if st["curve"] == "auto":
         return
     try:
+        # s0i3 分支不还原档位（守护施加曲线），但下面的日志仍要报出存档值，
+        # 所以 _lv / log_note 在两条分支之前就初始化好，不在 else 里才定义。
+        _lv = st.get("level")
+        log_note = ""
         # free 与 auto 在 CURVES 里映射为 None（它们不靠 EC88 写值），不能直接 0x%02X 展开。
         # free 的 EC 语义等同 s0i3（见 set_curve: free 分支复用 CURVES["s0i3"]）。
         ec_val = CURVES["s0i3"] if st["curve"] == "free" else CURVES[st["curve"]]
@@ -410,12 +417,24 @@ def apply_persisted_state():
             # 所以同样要恢复已存档位（专家审计 C2：原来 free 落不到这里，
             # 异常在 EC88 展开时就抛了，档位永远不恢复）。
             subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
-            if st.get("level"):
-                acpi(FSL, "1 %d" % int(st["level"]))
+            # level=0 与 level 缺失都不是"有意的 0"：set_level() 把档位钳在 >=1，
+            # 所以 0 永远只意味着"从没按过档位按钮"（缺省值见 :79）。旧实现把它当成
+            # "无可恢复"，于是 free 曲线在每次 pfanel 启动（含每次 deploy.sh）之后都把
+            # 风扇留在 _FSL 1 0 —— 而 s0i3 下 0 就是停转（实测，spec F2）。
+            # 回落值取 MIN_SAFE_LEVEL（FPS 表最低档），并且必须真的写出去。
+            if not _lv or int(_lv) < 1:
+                _lv = MIN_SAFE_LEVEL
+                log_note = "level 缺失或为 0 -> 回落下限 %d" % MIN_SAFE_LEVEL
+            acpi(FSL, "1 %d" % int(_lv))
         with open("/var/log/pfanel.log", "a") as f:
             f.write(
-                "%s 还原持久化状态 curve=%s level=%s\n"
-                % (time.strftime("%Y-%m-%d %H:%M:%S"), st["curve"], st.get("level"))
+                "%s 还原持久化状态 curve=%s level=%s%s\n"
+                % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    st["curve"],
+                    _lv,
+                    ("；" + log_note) if log_note else "",
+                )
             )
     except Exception as e:
         with open("/var/log/pfanel.log", "a") as f:
