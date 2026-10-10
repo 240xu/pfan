@@ -91,6 +91,25 @@ else
   echo "SKIP shell tests (none yet)"
 fi
 
+# 脱敏门也进 ci：pre-push 已经阻断过一次，但本地开发者第一次看到「你要发布的
+# 东西里有你的私钥路径 / 公网入口」应该是在 ci 里，不是 push 的最后一步。
+step "sanitize gate (scripts/sanitize.sh)"
+bash scripts/sanitize.sh > "$HOME/.cache/pfan-sanitize.txt" 2>&1
+_san_rc=$?
+_n=$(grep -cE '^  [a-zA-Z][^ ]*:[0-9]+' "$HOME/.cache/pfan-sanitize.txt" 2>/dev/null || echo 0)
+echo "  命中 $_n 处（详见 bash scripts/sanitize.sh）"
+# ⚠ 这里【不】让 ci 失败：这 19 处是本仓库作者自己的网络信息，它们【本来就该在】——
+#   这是私有仓库，代码里的 PFAN_HOST 默认值删了就坏。真正需要阻断的是「远端变成
+#   公开仓库的那一刻」，而那个时刻只能由人判断，所以门放在 hooks/pre-push：
+#     PFAN_PUBLISH=1 git push   → 脱敏未通过则拒绝推送
+#   平时 push 不受影响（PFAN_SKIP_SANITIZE=1 可显式跳过）。
+if [ "${PFAN_PUBLISH:-0}" = 1 ] && [ "$_san_rc" -ne 0 ]; then
+  echo "  [FAIL] PFAN_PUBLISH=1：发布前脱敏必须全绿（bash scripts/sanitize.sh）" >&2
+  rc=1
+elif [ "$_n" -gt 0 ]; then
+  echo "  (提示：准备公开时用 PFAN_PUBLISH=1 git push 强制脱敏全绿；或逐处处理后写进 scripts/sanitize.allow)"
+fi
+
 if compgen -G "tests/js/*.test.js" >/dev/null 2>&1; then
   step "vitest tests/js"
   if [ -f node_modules/vitest/vitest.mjs ]; then

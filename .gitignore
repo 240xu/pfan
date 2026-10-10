@@ -13,3 +13,7 @@ __pycache__/
 .env
 *.token
 .superpowers/
+
+# 脱敏门的本地配置：项目特有的禁止项与逐条豁免，都不该提交
+scripts/sanitize.local
+scripts/sanitize.allow

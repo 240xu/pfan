@@ -4,6 +4,31 @@
 set -e
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
+echo "== pre-push: 脱敏门（公开前的硬阻断）=="
+# 为什么放在 ci 之前：ci 证明代码是对的，sanitize 证明它【可以公开】。后者一旦
+# 漏掉就不可逆 —— 内网地址、公网入口主机名、私钥路径一旦推上去就等于公开。
+# 豁免走 scripts/sanitize.allow（gitignored），所以本机可以用它放行本机专属的行。
+# ⚠ 平时 push【不】被脱敏拦住：这 19 处是作者自己的网络信息，在私有仓库里它们
+#   本来就该在（代码里的 PFAN_HOST 默认值删了就坏）。一旦漏推出去就不可逆，所以
+#   阻断点放在「人明确表示要发布」的那一刻：
+#       PFAN_PUBLISH=1 git push     ← 远端将公开时用这个
+#   平时用 PFAN_SKIP_SANITIZE=1 显式跳过（脚本会把它记成"你决定了"，不是静默放过）。
+bash scripts/sanitize.sh > /dev/null 2>&1
+_san_rc=$?
+if [ "${PFAN_PUBLISH:-0}" = 1 ]; then
+  if [ "$_san_rc" -ne 0 ]; then
+    echo "pre-push 拒绝：PFAN_PUBLISH=1 表示远端将公开，但脱敏检查未通过。"
+    echo "  bash scripts/sanitize.sh 看逐条清单。三条路：改掉 / 写进 scripts/sanitize.allow /"
+    echo "  确认不敏感后写进 allow 并说明理由。绝不要用 PFAN_SKIP_SANITIZE 绕过发布门。"
+    exit 1
+  fi
+  echo "  发布门通过：脱敏全绿"
+elif [ "${PFAN_SKIP_SANITIZE:-0}" = 1 ]; then
+  echo "  (PFAN_SKIP_SANITIZE=1 —— 本次推送显式跳过脱敏)"
+else
+  echo "  脱敏：有命中但不阻断（私有仓库可接受）。公开前请用 PFAN_PUBLISH=1 git push。"
+fi
+
 echo "== pre-push: bash scripts/ci.sh =="
 bash scripts/ci.sh || { echo "pre-push 拒绝：ci 未通过"; exit 1; }
 
