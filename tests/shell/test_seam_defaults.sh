@@ -77,20 +77,47 @@ pin core/pfand  'PFAN_CONF:-/etc/pfand.conf' '权威曲线'
 pin core/pfand  'PFAN_CURVE_FILE:-/var/lib/pfanel/curve.state' '曲线状态'
 pin core/pfand  'PFAN_EMERG_FILE:-/var/lib/pfanel/emerg.state' '应急锁(⑬)'
 pin core/pfand  'PFAN_LOG:-/var/log/pfand.log' '守护日志'
-pin server/pfanel.py 'os.environ.get("PFAN_CONF", "/etc/pfand.conf")' 'pfanel 读同一份曲线'
-pin server/pfanel.py 'os.environ.get("PFAN_CURVE_FILE", "/var/lib/pfanel/curve.state")' 'pfanel 写同一份状态'
-pin server/pfanel.py 'os.environ.get("PFAN_TOKEN_FILE", "/var/lib/pfanel/token")' '鉴权令牌'
+# 这三条原先是文本钉（整行 grep 'os.environ.get("X", "Y")'）。它们能死在格式化上 ——
+# 本文件自己的开头就写着这个教训：自动格式化把一个 os.environ.get 折成两行，grep 型
+# 钉子当场失效，而"格式化器悄悄废掉安全守卫，比没有守卫更危险"。改走 py_default
+# （AST 解析，折行免疫）。shellcheck:disable=SC2016 下面那几条是 bash 语法，不受影响。
+py_default PFAN_CONF         '/etc/pfand.conf'            'pfanel 读同一份曲线'
+py_default PFAN_CURVE_FILE    '/var/lib/pfanel/curve.state' 'pfanel 写同一份状态'
+py_default PFAN_TOKEN_FILE    '/var/lib/pfanel/token'      '鉴权令牌'
 
 echo "== T4: 设备与平台路径 =="
 pin core/platform.sh 'PFAN_PLATFORM_CONF:-/etc/pfan/platform.conf' '平台配置定位器（事故根因那份）'
 pin core/pfand  'PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh' '加载器'
 pin core/pfan   'PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh' '加载器'
 pin core/pfan   'PFAN_THERMAL_DIR:-/sys/class/thermal' '热区目录'
-pin server/pfanel.py 'os.environ.get("PFAN_PANEL_DIR", "/opt/beszel/beszel_data")' '面板部署目录'
-pin server/pfanel.py '_PLAT.get("DEV", "/dev/pfanctl")' '设备兜底路径'
+py_default PFAN_PANEL_DIR    '/opt/beszel/beszel_data'    '面板部署目录'
+# _PLAT.get("DEV", ...) is not os.environ.get; same AST approach, different accessor
+plat_default(){ # plat_default <key> <expected-default> <why>
+  local key="$1" want="$2" why="$3" got
+  got=$(python3 - "$key" <<'PYEOF'
+import ast, sys
+key = sys.argv[1]
+src = open("server/pfanel.py", encoding="utf-8").read()
+for node in ast.walk(ast.parse(src)):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+       and node.func.attr == "get" and node.args:
+        a0 = node.args[0]
+        if isinstance(a0, ast.Constant) and a0.value == key and len(node.args) > 1:
+            a1 = node.args[1]
+            if isinstance(a1, ast.Constant):
+                print(a1.value); break
+PYEOF
+  )
+  if [ "$got" = "$want" ]; then
+    ok "server/pfanel.py 的 $key 缺省 = $got  ($why)"
+  else
+    ng "server/pfanel.py 的 $key 缺省 = '${got:-<解析不到>}'，期望 '$want'  ($why)"
+  fi
+}
+plat_default DEV '/dev/pfanctl' '设备兜底路径'
 
 echo "== T5: PFAN_PORT / PFAN_PROBE =="
-pin server/pfanel.py 'os.environ.get("PFAN_PORT", "8789")' '面板端口'
+py_default PFAN_PORT         '8789'                       '面板端口'
 pin core/pfand  'PFAN_PROBE:-0' '探测模式开关'
 
 echo "test_seam_defaults: fails=$fails"; exit "$fails"

@@ -345,6 +345,27 @@ else
   ok "文档不再把不存在的 \$STAGE/logrotate-pfan 当成现有路径（订正说明中的提及不计）"
 fi
 echo
+echo "== T20: Python 侧默认值断言必须走 AST，不得退回文本钉 =="
+# 审计 I-6：test_seam_defaults 的 py_default（AST 解析）当时只用在 PFAN_LOCK 与
+# PFAN_DMESG 两处，其余 7 个仍是整行 grep 'os.environ.get("X", "Y")'。本文件开头
+# 写着这个教训：自动格式化把那行折成两行，grep 型钉子当场失效。
+# 实证：把 pfanel.py 的 PFAN_PORT 折成 5 行（语法正确）后，grep -cF 匹配数 = 0。
+# 注意不要写 `grep -c ... || echo 0`：grep -c 在 0 匹配时已经输出 0 并返回 1，
+# 再 || 补一个 0 就得到两行，字符串比较随之失败（我第一版就这么写错了）。
+_grep_pins=$(grep -cE "^[[:space:]]*pin server/pfanel\.py" tests/shell/test_seam_defaults.sh 2>/dev/null)
+_grep_pins=${_grep_pins:-0}
+if [ "$_grep_pins" = "0" ]; then
+  ok "test_seam_defaults 对 pfanel.py 已无文本钉（全部走 AST）"
+else
+  ng "test_seam_defaults 还有 $_grep_pins 处 pin server/pfanel.py 文本钉 —— 格式化即失效"
+fi
+grep -q 'py_default PFAN_PORT' tests/shell/test_seam_defaults.sh \
+  && ok "PFAN_PORT 等缺省由 py_default（AST）断言" \
+  || ng "PFAN_PORT 未走 AST 断言"
+grep -q 'plat_default DEV' tests/shell/test_seam_defaults.sh \
+  && ok "_PLAT.get(\"DEV\") 缺省由 AST 断言" \
+  || ng "_PLAT.get(\"DEV\") 缺省未走 AST 断言"
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"
