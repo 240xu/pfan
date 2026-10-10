@@ -532,3 +532,61 @@ def test_persisted_state_with_missing_level_falls_back_too():
               if "_FSL" in l]
     last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
     assert last and int(last[-1]) >= 25, "缺 level 键时也必须回落，而不是留下停转"
+
+
+# ---------------- 续：存档 level 不是整数（"abc"）同样必须回落，而不是留下停转 ----------------
+# get_state() 把 JSON 里的 level 原样返回（pfanel.py:82），所以手改/写坏的曲线文件
+# 能把字符串送进还原分支。旧实现 `not _lv or int(_lv) < 1` 在 "abc" 上短路失败：
+# not "abc" 为 False → 求值 int("abc") 抛 ValueError → 被外层 except 吞掉 →
+# 日志只写"还原失败"，而 _FSL 停在两步之前刚写下的 1 0 —— 同一个"留下停转"的终态
+# 换条触发路径又回来了。
+
+
+def test_persisted_state_with_non_integer_level_falls_back_not_stops():
+    """存档 level="abc" 必须与 level=0 同类处理：回落到安全下限，绝不停转。
+
+    可达性窄但真实：save_state(level=) 只有一个调用者，写进去的是 set_level() 的
+    返回值（必是整数），所以 HTTP API 产生不了这种值；但曲线文件是一个【人手可改的
+    文本文件】，而"有人手改配置文件"正是本项目的既定威胁模型。
+    """
+    pfanel._APPLIED = False
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free", "level": "abc"}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()  # 清空：本文件其它测试也会往这里追加
+    import builtins as _b
+    import subprocess as _sp
+    import re as _re
+
+    _real_run, _real_open = _sp.run, _b.open
+    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    try:
+        pfanel.apply_persisted_state()  # 抛异常本身就是缺陷
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel._APPLIED = False
+    writes = [
+        l for l in _real_open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l
+    ]
+    last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
+    assert last and int(last[-1]) == 25, (
+        "level='abc' 时最终档位是 %r，必须与 level=0 同类回落到 25 而不是 0（0 = 停转）"
+        % (last[-1] if last else None,)
+    )
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "还原失败" not in logtext, (
+        "int('abc') 的 ValueError 冒进了外层 except，日志=%r" % (logtext,)
+    )
+    assert "abc" in logtext and "回落" in logtext, (
+        "回落既要写进日志、也要带上坏值本身，否则事后分不清是存档坏了还是设备坏了：%r"
+        % (logtext,)
+    )

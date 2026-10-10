@@ -422,10 +422,28 @@ def apply_persisted_state():
             # "无可恢复"，于是 free 曲线在每次 pfanel 启动（含每次 deploy.sh）之后都把
             # 风扇留在 _FSL 1 0 —— 而 s0i3 下 0 就是停转（实测，spec F2）。
             # 回落值取 MIN_SAFE_LEVEL（FPS 表最低档），并且必须真的写出去。
-            if not _lv or int(_lv) < 1:
+            # 存档里的 level 未必是整数：get_state() 原样返回 JSON 的值（:82），而
+            # 曲线文件是人手可改的文本。旧的 `not _lv or int(_lv) < 1` 对 "abc" 短路失败 ——
+            # not "abc" 是 False，于是求值 int("abc") 抛 ValueError，被外层 except 吞掉，
+            # 风扇停在两步之前刚写下的 _FSL 1 0：同一个"留下停转"换了条触发路径又回来了。
+            # 不可用一律折成 0，与 0 同类走同一条回落。三个异常类型都要接：JSON 的
+            # NaN → ValueError，±Infinity → OverflowError，None/[]/{} → TypeError。
+            # bool 单独排除：它是 int 的子类，int(True)==1 会写出 1 1（几乎等于停转）。
+            _lv_raw = _lv
+            if isinstance(_lv, bool):
+                _lv = 0
+            else:
+                try:
+                    _lv = int(_lv)
+                except (TypeError, ValueError, OverflowError):
+                    _lv = 0
+            if _lv < 1:
                 _lv = MIN_SAFE_LEVEL
-                log_note = "level 缺失或为 0 -> 回落下限 %d" % MIN_SAFE_LEVEL
-            acpi(FSL, "1 %d" % int(_lv))
+                log_note = "level 存档值 %r 不可用（缺失/非整数/负数/0）-> 回落下限 %d" % (
+                    _lv_raw,
+                    MIN_SAFE_LEVEL,
+                )
+            acpi(FSL, "1 %d" % _lv)
         with open("/var/log/pfanel.log", "a") as f:
             f.write(
                 "%s 还原持久化状态 curve=%s level=%s%s\n"
