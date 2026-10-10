@@ -54,10 +54,32 @@
 - token 是**静态 bearer**，无过期、无轮转。对单机 LAN 设备可接受，不是多租户方案。
 - 服务以 root 运行，任一服务被攻陷 = 主机被攻陷。缓解手段是上面的网络与 CSRF 边界。
 
+## Supported Versions（GitHub 安全页需要这一节才能渲染）
+
+| 版本 | 状态 |
+|---|---|
+| `main`（滚动） | ✅ 接收报告 |
+| 任何已发布的 tag | ❌ 不再维护（项目尚无发布版） |
+
 ## 漏洞报告
 
-请在本仓库开 issue（标注 `security`），或通过仓库 owner 的私有渠道联系。
-不要在公开 issue 里贴可直接利用的细节。
+**请用 GitHub 的私密漏洞报告，不要开公开 issue。**
+仓库页 → **Security** 标签 → **Report a vulnerability**（需登录）。
+若该功能未启用（仓库未开启 private vulnerability reporting，或你不愿登录），
+请通过仓库 owner 的私有渠道联系。
+
+**不要在公开 issue / 讨论 / PR 里贴可直接利用的细节** —— 这台设备以 root 运行，
+`/dev/pfanctl` 接受任意 ACPI 路径与整数参数并求值，对它的写权限等价于 root
+（见上文「权限」）。公开一份可用的利用细节，等于把它交给任何读到它的人。
+等 maintainer 确认已发布修复后再公开细节。
+
+**报告里值得包含的**（不必等你确认可复现）：
+
+- 你的机型 / BIOS 版本 / `uname -r`，以及 `modinfo /opt/pfanctl/pfanctl.ko | grep vermagic`
+- 复现步骤与观察到的行为（`/var/log/pfand.log` 相关片段、`/api/now` 的输出）
+- 哪一条信任边界被绕过：token 检查、Origin 白名单、`/dev/pfanctl` 权限、还是 ufw/CF 配置
+
+**不必包含**：可用的 payload、真实的 token 值、他人主机的地址。
 
 ## 参考
 

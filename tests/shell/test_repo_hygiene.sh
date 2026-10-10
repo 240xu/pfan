@@ -458,6 +458,23 @@ for f in hooks/pre-push scripts/ci.sh scripts/deploy.sh scripts/smoke.sh; do
 done
 [ "$_bad" = 0 ] && echo "  （已检查的脚本里没有未兜住的裸调用）"
 echo
+echo "== T23: SECURITY.md 作为【公开】文档必须可用 =="
+# 审计 checklist 第 9 项：SECURITY.md 原来写「请在本仓库开 issue」，而远端是私有仓库 ——
+# 对着私密 issue 通道说「开 issue」既不指向任何私密通道，也训练报告者把细节贴到公开处。
+# 对一台 root 运行、/dev/pfanctl 等价于 root 的设备，这正是最不该发生的事。
+grep -qE '请在本仓库开 issue' SECURITY.md \
+  && ng "SECURITY.md 仍让报告者开 issue —— 远端是私有仓库，且会训练报告者公开细节" \
+  || ok "SECURITY.md 不再指示开公开 issue"
+grep -qE 'Report a vulnerability|私密漏洞报告|private vulnerability' SECURITY.md \
+  && ok "SECURITY.md 指向 GitHub 私密漏洞报告" \
+  || ng "SECURITY.md 没有指向私密漏洞报告通道"
+grep -qE '^#+ *Supported Versions|^#+ .*支持版本' SECURITY.md \
+  && ok "SECURITY.md 有 Supported Versions 段（GitHub 安全页需要才渲染）" \
+  || ng "SECURITY.md 缺 Supported Versions 段"
+grep -q '不要在公开' SECURITY.md \
+  && ok "SECURITY.md 明确要求不要公开可利用细节" \
+  || ng "SECURITY.md 未禁止公开可利用细节"
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"
