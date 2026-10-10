@@ -13,8 +13,12 @@ echo "== pre-push: 脱敏门（公开前的硬阻断）=="
 #   阻断点放在「人明确表示要发布」的那一刻：
 #       PFAN_PUBLISH=1 git push     ← 远端将公开时用这个
 #   平时用 PFAN_SKIP_SANITIZE=1 显式跳过（脚本会把它记成"你决定了"，不是静默放过）。
-bash scripts/sanitize.sh > /dev/null 2>&1
-_san_rc=$?
+# ⚠ 必须 `|| true` 兜住：pre-push 顶部有 set -e，而 sanitize.sh 发现命中就返回非0 ——
+#   不兜住的话，整个 hook 会在这一行静默死掉，git 只报 "failed to push some refs"，
+#   看不到任何原因（2026-10-10 实测踩到）。
+bash scripts/sanitize.sh > /dev/null 2>&1 || true
+_san_rc=0
+bash scripts/sanitize.sh > /dev/null 2>&1 || _san_rc=$?
 if [ "${PFAN_PUBLISH:-0}" = 1 ]; then
   if [ "$_san_rc" -ne 0 ]; then
     echo "pre-push 拒绝：PFAN_PUBLISH=1 表示远端将公开，但脱敏检查未通过。"

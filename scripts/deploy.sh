@@ -74,7 +74,9 @@ B="/root/backups/pfan-deploy-$TS"
 STAGE="/tmp/pfan-deploy-$$"
 
 echo "== 0/5 本地 CI =="
-bash scripts/ci.sh
+# ⚠ 不用裸调用：set -e 下 ci 返回非0 会让 deploy 静默死在这里，终端只看到脚本停了，
+#   看不到"是哪一步、为什么"。显式判断并给出消息（T22 守的就是这个形状）。
+bash scripts/ci.sh || { echo "[FAIL] 本地 CI 未通过 —— 部署中止（不碰目标机）" >&2; exit 1; }
 
 echo "== 1/5 目标机建恢复点 + 暂存新文件 =="
 # 备份目录在 /root 下 → 必须 sudo；暂存目录必须由 pfan 拥有，否则 scp 写不进去
@@ -252,7 +254,7 @@ echo "== 4c/5 复核日志轮转已生效 =="
 R "sudo -n logrotate -d /etc/logrotate.d/pfan 2>&1 | grep -E 'considering log file|error' | head -3 | sed 's/^/    /'"
 
 echo "== 5/5 实机冒烟 =="
-bash scripts/smoke.sh
+bash scripts/smoke.sh || { echo "[FAIL] 实机冒烟未通过 —— 见上面断言。回滚点: $HOST:$B" >&2; exit 1; }
 
 echo
 echo "deploy OK"

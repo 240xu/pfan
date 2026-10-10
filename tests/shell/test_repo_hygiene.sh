@@ -389,6 +389,36 @@ grep -q 'os.replace\|mv "\$T" "\$PFAN_CONF"' core/pfan \
   && ok "preset apply 是原子替换（守护不会读到半截文件）" \
   || ng "preset apply 不是原子写"
 echo
+echo "== T22: set -e 脚本里调用可能非0 的命令必须显式兜住 =="
+# 第三次同类事故（见 ledger）：hooks/pre-push 顶部有 set -e，我加的
+# `bash scripts/sanitize.sh > /dev/null 2>&1` 在发现 19 处命中时返回非0 —— set -e 于是
+# 静默终止整个 hook，git 只报 "failed to push some refs"，看不到任何原因。
+# 判据：pre-push / ci.sh / deploy.sh 里，形如 `某命令` 且【没有】 || true / || rc=1 /
+# || { ... } 收尾的行，且该命令可能非0。
+_bad=0
+for f in hooks/pre-push scripts/ci.sh scripts/deploy.sh scripts/smoke.sh; do
+  [ -f "$f" ] || continue
+  # 找出裸的命令调用（不以 if/for/while/&&/|/# 开头，也不是赋值），且同行无 ||
+  while IFS= read -r ln; do
+    case "$ln" in
+      *'||'*|*'&&'*|*'| '*|*'if '*|*'then'*|*'#'*|*'= '*|*'$('*) continue ;;
+    esac
+    cmd=$(printf '%s' "$ln" | sed 's/^[[:space:]]*//; s/[[:space:]].*//')
+    case "$cmd" in
+      # rm/cp/mv 的裸调用【不算缺陷】：清理或覆盖失败时 set -e 终止正是想要的行为。
+      # 只有"报告型"命令（跑测试/脚本/查询）裸调用才危险 —— 它们返回非0 时
+      # 信息会随脚本一起消失。
+      bash|sh|python3|node|git)
+        # 这些若在 set -e 下裸调用且允许非0，必须已被 || 或 if 包裹
+        if ! grep -q "set -[a-z]*e" "$f" 2>/dev/null; then continue; fi
+        if ! grep -qE "^[[:space:]]*${cmd} " "$f" 2>/dev/null; then continue; fi
+        ng "$f 有裸的 '$cmd ...' 调用且同行无 || 兜住 —— set -e 下会静默终止"
+        _bad=$((_bad+1)) ;;
+    esac
+  done < "$f"
+done
+[ "$_bad" = 0 ] && echo "  （已检查的脚本里没有未兜住的裸调用）"
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"
