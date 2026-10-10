@@ -91,7 +91,9 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt
                  /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/core.js \
                  /opt/beszel/beszel_data/vendor/uPlot.esm.js \
                  /opt/beszel/beszel_data/vendor/uPlot.min.css \
-                 /opt/beszel/beszel_data/vendor/uPlot.LICENSE; do
+                 /opt/beszel/beszel_data/vendor/uPlot.LICENSE \
+                 /opt/pfanctl/presets/pfan.conf.cool-quiet \
+                 /opt/pfanctl/presets/pfan.conf.performance; do
            # ⚠ [ -e ] 必须带 sudo：面板目录 /opt/beszel/beszel_data 是 drwx------ root:root，
            # pfan 无权穿越，于是非 sudo 的 [ -e ] 一律 false，7 个面板文件的备份被【静默跳过】，
            # 而 || true 让它看不出错 —— 恢复点少了第 3 步要覆盖的全部面板文件（实测确认）。
@@ -111,6 +113,10 @@ S deploy/check-recovery-point.sh
 S server/pfanel.py server/pfan_platform.py server/pfan_core.py
 S panel/index.html panel/styles.css panel/app.js panel/core.js
 S platform/platform.conf.example platform/fan-candidates.txt
+# 曲线预设必须随部署上机：`pfan preset list` 从 /opt/pfanctl/presets 读，
+# 没有这条它们就只是仓库里的三个文件（审计 I-7：零消费者、无法通过任何受支持
+# 的路径启用）。装到预设目录而不是 config/，与 pfan preset 的查找路径一致。
+S config/pfand.conf.cool-quiet config/pfand.conf.performance
 # ⚠ 必须用独立暂存名：core/pfan 也叫 $STAGE/pfan，两份 scp 到同一路径会互相覆盖，
 # 结果是【把 logrotate 配置装成 /usr/local/bin/pfan】、把 CLI 装成 logrotate 规则。
 #（暂存后盲 `ls` 看不出这个碰撞 —— 两份内容都"在"，只是名字被抢了。）
@@ -154,6 +160,7 @@ fi
 for _must in pfand pfan-cli pfanel.py pfan_platform.py pfan_core.py platform.sh \
              platform.conf.example fan-candidates.txt index.html styles.css app.js core.js \
              deploy/logrotate.d/pfan deploy/check-recovery-point.sh \
+             pfand.conf.cool-quiet pfand.conf.performance \
              uPlot.esm.js uPlot.min.css uPlot.LICENSE; do
   # 注意：这里【不能】写成 "test -f '$STAGE/$_must'" —— R 用 "$@" 转发，
   # 双引号里的单引号会被原样送到远端 shell，于是路径里带上引号字符、test 永远失败。
@@ -163,7 +170,7 @@ for _must in pfand pfan-cli pfanel.py pfan_platform.py pfan_core.py platform.sh 
   R "ls $STAGE/$_must >/dev/null" \
     || { echo "[FAIL] 暂存区缺少 $_must —— 传输不完整，中止（不要拿残缺暂存区去安装）" >&2; exit 1; }
 done
-echo "  暂存区 17 个文件齐备"
+echo "  暂存区 19 个文件齐备"
 R "ls -la '$STAGE' | tail -n +2"
 
 echo "== 3/5 安装（顺序：平台配置 -> 代码 -> 面板）=="
@@ -186,6 +193,11 @@ R "set -e
     sudo -n install -m 644 '$STAGE/pfan_core.py'     /usr/local/bin/pfan_core.py
     # 3d. ⑭ 日志轮转：不装的话 /var/log/pfand.log 会无限长
     sudo -n install -m 644 '$STAGE/deploy/logrotate.d/pfan' /etc/logrotate.d/pfan
+    # 曲线预设装到 pfan preset 的查找目录
+    sudo -n mkdir -p /opt/pfanctl/presets
+    sudo -n install -m 644 '$STAGE/pfand.conf.cool-quiet'  /opt/pfanctl/presets/pfan.conf.cool-quiet
+    sudo -n install -m 644 '$STAGE/pfand.conf.performance' /opt/pfanctl/presets/pfan.conf.performance
+    echo "  预设已安装: pfan preset list"
     # 先做一次语法演练 —— 配置写错了要等一个月才爆，而且那时日志已经不可控
     sudo -n logrotate -d /etc/logrotate.d/pfan >/dev/null
     echo '  /etc/logrotate.d/pfan 已安装并通过 logrotate -d 自检'

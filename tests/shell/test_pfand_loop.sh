@@ -71,7 +71,15 @@ timeout 120 env PFAN_PLATFORM_CONF="$T/plat.conf" PFAN_DEV="$T/dev" PFAN_DMESG=f
   PFAN_CURVE_FILE="$T/curve" PFAN_EMERG_FILE="$T/emerg" PFAN_LOG="$T/pfand.log" \
   bash core/pfand >"$T/out" 2>&1 &
 PIDD=$!
-sleep 5
+  # 轮询而不是固定 sleep 5：守护启动要走平台探测 + ensure_s0i3（含 sleep 0.3），
+  # 机器负载高时（deploy 同时在跑 ci + ssh）5 秒不够，断言就落在握手中途 —— 读到
+  # dl 里只有 EC88 + 两次 _FST，报成「没有 _FSL 写入」（2026-10-10 实测踩到）。
+  _w=0
+  while [ "$_w" -lt 25 ]; do
+    grep -q '_FSL 1 ' "$T/dl" 2>/dev/null && break
+    grep -q '平台配置不可用' "$T/pfand.log" 2>/dev/null && break
+    sleep 1; _w=$((_w + 1))
+  done
 # 必须查【累计流水】$T/dl 而不是 $T/dev：假设备文件只保留最后一次操作，
 # 而 getL 之后写进去的必然是 _FST 读请求 —— 拿它断言会得到假阴性。
 if grep -q '平台配置不可用' "$T/pfand.log" 2>/dev/null; then

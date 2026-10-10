@@ -48,7 +48,26 @@ for s in pfanctl pfand pfanel; do
 done
 
 printf '\n=== 2. API 形状（LAN）===\n'
-j=$(timeout 20 curl -fsS --max-time 12 "$API/api/now" 2>/dev/null) || { bad "LAN $API/api/now 不可达"; j=""; }
+# ⚠ 先等守护写出第一个档位再断言：pfand 每次启动都会先 ensure_s0i3()，而那一步
+# 会写 _FSL 1 0（s0i3 的握手序列，固件在此期间不转），随后才写真正的档位。这个
+# 窗口约 1.2s（实测），一个 IV 之内自愈。deploy.sh 刚重启过 pfand 时立刻跑 smoke
+# 就会正好采到 level=0，误报成"风扇停转 + API 字段缺失"（2026-10-10 实测踩到）。
+# 这里最多等 25s，让 smoke 不再替守护的启动握手背锅。
+_waited=0
+while :; do
+  j=$(timeout 20 curl -fsS --max-time 12 "$API/api/now" 2>/dev/null) && break
+  j=""
+  break
+done
+while [ "$_waited" -lt 25 ]; do
+  case "$j" in *'"level":0'*) ;; *) break ;; esac
+  sleep 2; _waited=$((_waited + 2))
+  j=$(timeout 20 curl -fsS --max-time 12 "$API/api/now" 2>/dev/null) || j=""
+done
+[ -n "$j" ] || bad "LAN $API/api/now 不可达"
+if [ "$_waited" -gt 0 ]; then
+  echo "    （等了 ${_waited}s 让 pfand 走出 s0i3 握手窗口 —— level=0 在守护刚启动时是预期的，不是停转）"
+fi
 if [ -n "$j" ]; then
   if echo "$j" | jq -e '(.ts|type=="number") and ((.temp == null) or (.temp|type=="number"))
         and (.level|type=="number") and (.ec76|type=="number")

@@ -16,6 +16,10 @@ PLAT_CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 [ -f "$PLAT_CAND" ] || PLAT_CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
 # 测试接缝：真实控制路径需要 /dev/pfanctl 与 /run/pfanel.lock（都要 root），
 # 单测用 PFAN_DEV=/dev/null + PFAN_LOCK=<临时文件> 覆盖。生产从不设置。
+# 预设应用要写的权威文件与要重启的守护（与 pfand 的 PFAN_CONF 同一个接缝）
+PFAN_CONF="${PFAN_CONF:-/etc/pfand.conf}"
+PFAN_SERVICE="${PFAN_SERVICE:-pfand}"
+
 DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
 LOCK="${PFAN_LOCK:-/run/pfanel.lock}"
 # dmesg 读取接缝（约定同 core/pfand：PFAN_DMESG，缺省 dmesg）。生产从不设置：
@@ -141,6 +145,92 @@ detect(){
   fi
 }
 
+# ---- 预设（config/pfand.conf.<名字>）--------------------------------------------
+# 存在理由：这两套预设原先【没有任何消费者】——面板、pfanel、deploy、smoke、文档
+# 都不引用它们，想用只能手工 cp 覆盖 /etc/pfand.conf，而 OPERATIONS.md 恰恰写着
+# 「不要只在机器上手改，否则下次 smoke 必红」。也就是说：交付了一个用不了的配置。
+#
+# 这里给出受校验的入口，并遵守既有纪律：
+#   * 走与面板 /api/params 相同的 validate_params（server/pfan_core.py）
+#   * 原子替换（.tmp + os.replace 等价的 mv），pfand 不会读到半截文件
+#   * 应用后提示 smoke 会因 sha 变化而红，并给出同步命令 —— 不假装可以绕过
+preset_dir(){ printf '%s' "${PFAN_PRESET_DIR:-/opt/pfanctl/presets}"; }
+preset_names(){
+  d=$(preset_dir); [ -d "$d" ] || { echo "预设目录不存在: $d" >&2; return 1; }
+  # 不用 ls 通配符：部分 sh（Termux 的 sh、以及脚本被 . 引用时的解析环境）不展开
+  # pfan.conf.*，于是 list 会静默返回空。
+  # 用 ls -1 + 参数展开，而不是 find -name / ls 通配符：
+  # 实测本机 find 的 -name 完全不生效（连精确文件名都匹配不到），而脚本被 `.`
+  # 引用时 glob 也不展开。ls -1 列目录是这三者里唯一到处都能用的。
+  ls -1 "$d" 2>/dev/null | while read -r f; do
+    case "$f" in
+      pfan.conf.*) printf '%s\n' "${f#pfan.conf.}" ;;
+    esac
+  done | grep -v '^\*' | sort
+}
+preset_show(){
+  n=${1:-}; d=$(preset_dir); f="$d/pfan.conf.$n"
+  [ -n "$n" ] || { echo "用法: pfan preset show <名字>" >&2; preset_names; return 1; }
+  [ -f "$f" ] || { echo "没有预设 '$n'。可用：" >&2; preset_names >&2; return 1; }
+  cat "$f"
+}
+preset_validate(){ # preset_validate <文件>
+  python3 - "$1" <<'PVEOF'
+import os, re, sys
+# pfan_core.py 装在 /usr/local/bin（deploy 的安装目标）；仓库内测试时它在 server/。
+# ⚠ 不能用相对路径 "server"：调用方 cwd 不是仓库根（pfan 从 /usr/local/bin 跑，或从
+# 任意目录跑），相对路径会找不到 —— 而 import 失败抛出的异常会被调用方的
+# `|| return 1` 吞成「校验没通过」，看起来像校验在生效，其实是它根本没跑起来。
+# 我第一版正是这样：坏曲线（EMERG 改成 40，明显自相矛盾）通过了 apply。
+_cands = ["/usr/local/bin", "/opt/pfanctl", os.path.join(os.getcwd(), "server")]
+for _p in _cands:
+    if os.path.isfile(os.path.join(_p, "pfan_core.py")):
+        sys.path.insert(0, _p); break
+else:
+    print("找不到 pfan_core.py（试过 %s）—— 校验没有真的跑" % ", ".join(_cands), file=sys.stderr)
+    sys.exit(2)
+from pfan_core import validate_params
+d = {}
+try:
+    for line in open(sys.argv[1], encoding="utf-8"):
+        m = re.match(r"^([A-Z0-9_]+)=(-?\d+)\s*$", line.strip())
+        if m:
+            d[m.group(1)] = int(m.group(2))
+except OSError as ex:
+    print("读不到 %s: %s" % (sys.argv[1], ex), file=sys.stderr)
+    sys.exit(2)
+errs = validate_params(d)
+for e in errs:
+    print("  参数错误: %s" % e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+PVEOF
+}
+preset_apply(){
+  n=${1:-}; d=$(preset_dir); f="$d/pfan.conf.$n"
+  [ -n "$n" ] || { echo "用法: pfan preset apply <名字>" >&2; preset_names >&2; return 1; }
+  [ -f "$f" ] || { echo "没有预设 '$n'。可用：" >&2; preset_names >&2; return 1; }
+  preset_validate "$f" || { echo "  预设 '$n' 未通过 validate_params —— 拒绝应用（一个坏曲线比旧曲线危险）" >&2; return 1; }
+  [ "$(id -u)" = 0 ] || { echo "需要 root：改 /etc/pfand.conf" >&2; return 1; }
+  T=$(mktemp "${TMPDIR:-/tmp}/pfand.conf.XXXXXX") || return 1
+  cp "$f" "$T" || { rm -f "$T"; return 1; }
+  chmod 644 "$T"
+  mv "$T" "$PFAN_CONF" || { rm -f "$T"; echo "写入 $PFAN_CONF 失败" >&2; return 1; }
+  echo "已应用预设 '$n' 到 $PFAN_CONF"
+  echo "⚠ 两件必须做的事，否则下次 smoke 必红："
+  echo "  1) 同步仓库副本：  cp $f config/pfand.conf.example   （然后提交）"
+  echo "  2) 让守护重读：    systemctl restart $PFAN_SERVICE"
+  echo "  校验：             bash scripts/smoke.sh"
+}
+preset_cmd(){
+  sub=${1:-list}; shift 2>/dev/null || true
+  case "$sub" in
+    list)   preset_names ;;
+    show)   preset_show "$@" ;;
+    apply)  preset_apply "$@" ;;
+    *)      echo "用法: pfan preset {list|show <名字>|apply <名字>}" >&2; exit 1 ;;
+  esac
+}
+
 case "$1" in
   detect) shift; detect "$@" ;;
   get)    need_F || exit 1; acquire; run "$F._FST" | sed 's/.*RESULT //' ;;
@@ -169,7 +259,8 @@ case "$1" in
           rb=$(run "$F._FST" | sed 's/.*RESULT //')
           flock -u 8 2>/dev/null || true
           echo "已设 ${L}% -> 当前 ${rb:-<读回失败>}" ;;
-  sensors) need_F || exit 1; acquire; run "\_SB_.PTID.OSDL" | sed 's/.*RESULT //' ;;
+  preset) shift; preset_cmd "$@" ;;
+  sensors) need_F || exit 1; acquire; run "\_SB.PTID.OSDL" | sed 's/.*RESULT //' ;;
   list)   echo "档位: 1..120 任意整数（0 被禁：实测 _FSL 0 = 风扇停转）" ;;
-  *)      echo "用法: pfan {detect [--write <file>]|get|set <档位>|list|sensors}"; exit 1 ;;
+  *)      echo "用法: pfan {detect [--write <file>]|get|set <档位>|preset <list|show|apply> <名字>|list|sensors}"; exit 1 ;;
 esac

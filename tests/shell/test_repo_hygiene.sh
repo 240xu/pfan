@@ -366,6 +366,29 @@ grep -q 'plat_default DEV' tests/shell/test_seam_defaults.sh \
   && ok "_PLAT.get(\"DEV\") 缺省由 AST 断言" \
   || ng "_PLAT.get(\"DEV\") 缺省未走 AST 断言"
 echo
+echo "== T21: 曲线预设必须有【受支持的启用路径】与【部署路径】 =="
+# 审计 I-7 + M4：两套预设原先零消费者 —— 面板、pfanel、deploy、smoke、文档都不引用，
+# 想用只能手工 cp 覆盖 /etc/pfand.conf，而 OPERATIONS.md 恰恰写着「不要手改，否则
+# 下次 smoke 必红」。也就是说交付了一个用不了的配置。
+# 现在：deploy 传到 /opt/pfanctl/presets，pfan preset list/show/apply 是入口。
+grep -q 'S config/pfand.conf.cool-quiet config/pfand.conf.performance' scripts/deploy.sh \
+  && ok "deploy.sh 传输两套预设" \
+  || ng "deploy.sh 不传预设 —— 它们无法通过任何受支持路径上机"
+grep -q '/opt/pfanctl/presets/pfan.conf.cool-quiet' scripts/deploy.sh \
+  && ok "预设安装到 pfan preset 的查找目录" \
+  || ng "预设安装路径与 pfan preset 的查找路径不一致"
+grep -q 'preset_dir(){ printf' core/pfan \
+  && ok "pfan CLI 有 preset 子命令" \
+  || ng "pfan CLI 没有 preset 子命令 —— 预设仍然只能手工 cp"
+# apply 必须过 validate_params：手工 cp 绕过面板的校验，而 pfand 的自检只查
+# 「是不是数字 + 三条关系 + 档位下界」，一个 EMERG < EMERG_REL 的曲线它【能】通过。
+grep -q 'validate_params' core/pfan \
+  && ok "preset apply 复用 validate_params（与面板同一份校验）" \
+  || ng "preset apply 不校验 —— 一个坏曲线会被直接装上"
+grep -q 'os.replace\|mv "\$T" "\$PFAN_CONF"' core/pfan \
+  && ok "preset apply 是原子替换（守护不会读到半截文件）" \
+  || ng "preset apply 不是原子写"
+echo
 echo "== T14: 探测型断言不得把【没连上】当成【通过】（fail-open 守卫）=="
 # 专家审计（发布域，实测复现）：§2b 用 `... || true` 吞掉 curl 的退出码，于是
 # 超时/连接断开时 acao 为空，紧接着 `[ -z "$acao" ] -> ok` 就把"根本没连上服务器"
