@@ -13,3 +13,13 @@ DEV=/dev/pfanctl
 # （两侧加载器与 detect 都写/查它，只为平台配置完整性与 REQUIRED 校验保留）。
 # 换机型请先跑 `pfan detect` 确认真实路径，不要手抄本文件。
 EC_CMD=0xB5
+
+# 面板部署目录（静态资源，不是硬件平台路径）。deploy.sh 与 smoke.sh 都从这一行
+# 派生自己的路径，所以换布局只改这里一处，不必在 40 多个地方同步。
+# ⚠ 默认值指向 Beszel 的私有数据目录 —— 这台机器上它同时装着 Beszel 自己的
+#   data.db 与 id_ed25519（SSH 身份私钥）。pfan 只写自己的 7 个文件，从不读别的，
+#   但把公开项目的默认路径放在别人应用的私有目录里是不合适的：fork 之后会以为
+#   这是 pfan 的目录，删掉它就连带删掉了别人的东西。
+#   换成 /usr/local/share/pfan 只需改这一行 + pfanel.py 的同名默认值（见 docs/OPERATIONS.md
+#   「面板目录」一节的迁移步骤）。
+PANEL_DIR=/opt/beszel/beszel_data

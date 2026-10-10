@@ -18,6 +18,14 @@ GUARD_FAILSAFE_JQ='((.temp == null or .temp >= $emerg) | not) or (.level == 100)
 
 HOST="${PFAN_HOST:-192.168.1.10}"
 API="${PFAN_API:-http://$HOST:8789}"
+
+# 面板目录必须与 deploy.sh 和 pfanel.py 同源（都从 platform.conf 派生），否则
+# "改了部署路径、冒烟还在查旧路径"会变成静默失效的守卫。见 deploy.sh 的 PDIR。
+PANEL_DIR="${PFAN_PANEL_DIR:-}"
+if [ -z "$PANEL_DIR" ]; then
+  PANEL_DIR=$(sed -n 's/^PANEL_DIR=//p' platform/platform.conf.example 2>/dev/null | head -1) || true
+fi
+PANEL_DIR="${PANEL_DIR:-/opt/beszel/beszel_data}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/pfan"
 mkdir -p "$CACHE"
 OPTS=(-i "$HOME/.ssh/pfan_deploy_key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=8)
@@ -150,17 +158,17 @@ else
 fi
 
 printf '\n=== 5. 面板部署件与仓库一致，且无硬编码密钥 ===\n'
-# 线上真正被服务的是 /opt/beszel/beszel_data/（server/pfanel.py 的 PANEL_DIR：
+# 线上真正被服务的是 $PANEL_DIR/（server/pfanel.py 的 PANEL_DIR：
 # /pfan→index.html, /pfan.css→styles.css, /pfan.js→app.js, /pfan-core.js→core.js），
 # 不是仓库里的 panel/ 副本。只扫仓库副本会在两边字节已经分叉时假绿 ——
 # 必须比对【实际部署件】的 sha256。全程只读：sha256sum / grep。
 for f in index.html styles.css app.js core.js; do
   LH=$(sha256sum "panel/$f" 2>/dev/null | awk '{print $1}')
   if [ -z "$LH" ]; then bad "仓库缺 panel/$f"; continue; fi
-  RH=$(remote "sha256sum /opt/beszel/beszel_data/$f" 2>/dev/null | awk '{print $1}')
-  [ -n "$RH" ] || RH=$(remote "sudo -n sha256sum /opt/beszel/beszel_data/$f" 2>/dev/null | awk '{print $1}')
+  RH=$(remote "sha256sum $PANEL_DIR/$f" 2>/dev/null | awk '{print $1}')
+  [ -n "$RH" ] || RH=$(remote "sudo -n sha256sum $PANEL_DIR/$f" 2>/dev/null | awk '{print $1}')
   if [ -z "$RH" ]; then
-    bad "部署件读不到: /opt/beszel/beszel_data/$f（未部署？）"
+    bad "部署件读不到: $PANEL_DIR/$f（未部署？）"
   elif [ "$LH" = "$RH" ]; then
     ok "部署件 $f 与仓库一致 ($LH)"
   else
@@ -171,8 +179,8 @@ done
   # vendor 两件是 app.js 的 ESM 依赖，漂移=面板静默半死，一并比对
   for f in uPlot.esm.js uPlot.min.css; do
     LH=$(sha256sum "panel/vendor/$f" 2>/dev/null | awk '{print $1}')
-    RH=$(remote "sha256sum /opt/beszel/beszel_data/vendor/$f 2>/dev/null" 2>/dev/null | awk '{print $1}')
-    [ -n "$RH" ] || RH=$(remote "sudo -n sha256sum /opt/beszel/beszel_data/vendor/$f 2>/dev/null" 2>/dev/null | awk '{print $1}')
+    RH=$(remote "sha256sum $PANEL_DIR/vendor/$f 2>/dev/null" 2>/dev/null | awk '{print $1}')
+    [ -n "$RH" ] || RH=$(remote "sudo -n sha256sum $PANEL_DIR/vendor/$f 2>/dev/null" 2>/dev/null | awk '{print $1}')
     if [ -z "$LH" ]; then bad "仓库缺 panel/vendor/$f"
     elif [ -z "$RH" ]; then bad "vendor 部署件读不到: $f（未部署？面板会全挂）"
     elif [ "$LH" != "$RH" ]; then bad "vendor 部署件 $f 已漂移: repo=$LH live=$RH"
@@ -199,10 +207,10 @@ dep_grep(){   # dep_grep <regex> <files...>  → 0=匹配 1=没匹配 2=两次�
   remote "sudo -n test -r $(echo "$*" | cut -d' ' -f1)" 2>/dev/null && return 1
   return 2
 }
-dep_grep '__PFAN_TOKEN__' /opt/beszel/beszel_data/app.js
+dep_grep '__PFAN_TOKEN__' $PANEL_DIR/app.js
 case $? in
   0)
-    dep_grep "$SECRET_RE" /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/index.html
+    dep_grep "$SECRET_RE" $PANEL_DIR/app.js $PANEL_DIR/index.html
     case $? in
       0) bad "部署件疑似含真实密钥/UUID" ;;
       1) ok "部署件 app.js 只含 __PFAN_TOKEN__ 占位符" ;;

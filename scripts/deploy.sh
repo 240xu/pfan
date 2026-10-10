@@ -73,6 +73,22 @@ TS=$(date +%Y%m%d-%H%M%S)
 B="/root/backups/pfan-deploy-$TS"
 STAGE="/tmp/pfan-deploy-$$"
 
+# 面板部署目录从【平台配置】派生，而不是在本文件里再硬编码一次。
+# 理由：pfanel.py 已经从 platform.conf 读 PANEL_DIR，本脚本与 smoke.sh 也必须读同一个
+# 值 —— 三处各自硬编码正是"改了一处、另两处静默指错目录"的来源（audit m-7 的核心问题）。
+# 覆盖顺序：环境变量 > 仓库的 platform.conf.example（目标机上同一份由 deploy 安装，
+# pfanel.py 从 /etc/pfan/platform.conf 读）。
+# ⚠ 每一层都必须 || true 或用 if 包住：set -e 下 sed 读不到文件返回非0，
+#   $(...) 赋值语句非0 会【直接杀掉整个脚本】—— 2026-10-10 实测踩到，症状是
+#   deploy 在第 81 行静默消失、屏幕上只留下一句 [FAIL]。
+PANEL_DIR="${PFAN_PANEL_DIR:-}"
+if [ -z "$PANEL_DIR" ]; then
+  PANEL_DIR=$(sed -n 's/^PANEL_DIR=//p' platform/platform.conf.example 2>/dev/null | head -1) || true
+fi
+PANEL_DIR="${PANEL_DIR:-/opt/beszel/beszel_data}"
+echo "  面板目录: $PANEL_DIR"
+PDIR="$PANEL_DIR"
+
 echo "== 0/5 本地 CI =="
 # ⚠ 不用裸调用：set -e 下 ci 返回非0 会让 deploy 静默死在这里，终端只看到脚本停了，
 #   看不到"是哪一步、为什么"。显式判断并给出消息（T22 守的就是这个形状）。
@@ -80,7 +96,7 @@ bash scripts/ci.sh || { echo "[FAIL] 本地 CI 未通过 —— 部署中止（�
 
 echo "== 1/5 目标机建恢复点 + 暂存新文件 =="
 # 备份目录在 /root 下 → 必须 sudo；暂存目录必须由 pfan 拥有，否则 scp 写不进去
-R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt/beszel/beszel_data/vendor && \
+R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan $PDIR/vendor && \
     for f in /usr/local/bin/pfand /usr/local/bin/pfan /usr/local/bin/pfanel.py \
              /usr/local/bin/pfan_platform.py /usr/local/bin/pfan_core.py; do \
       [ -e \"\$f\" ] && sudo -n cp -a \"\$f\" '$B/'; done; \
@@ -89,19 +105,19 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan /opt
         # （专家审计 C2）。platform.conf 例外：它只在【缺失时】写入，不覆盖。
         for f in /etc/logrotate.d/pfan /usr/local/lib/pfan/platform.sh \
                  /etc/pfan/fan-candidates.txt \
-                 /opt/beszel/beszel_data/index.html /opt/beszel/beszel_data/styles.css \
-                 /opt/beszel/beszel_data/app.js /opt/beszel/beszel_data/core.js \
-                 /opt/beszel/beszel_data/vendor/uPlot.esm.js \
-                 /opt/beszel/beszel_data/vendor/uPlot.min.css \
-                 /opt/beszel/beszel_data/vendor/uPlot.LICENSE \
+                 $PDIR/index.html $PDIR/styles.css \
+                 $PDIR/app.js $PDIR/core.js \
+                 $PDIR/vendor/uPlot.esm.js \
+                 $PDIR/vendor/uPlot.min.css \
+                 $PDIR/vendor/uPlot.LICENSE \
                  /opt/pfanctl/presets/pfan.conf.cool-quiet \
                  /opt/pfanctl/presets/pfan.conf.performance; do
-           # ⚠ [ -e ] 必须带 sudo：面板目录 /opt/beszel/beszel_data 是 drwx------ root:root，
+           # ⚠ [ -e ] 必须带 sudo：面板目录 $PDIR 是 drwx------ root:root，
            # pfan 无权穿越，于是非 sudo 的 [ -e ] 一律 false，7 个面板文件的备份被【静默跳过】，
            # 而 || true 让它看不出错 —— 恢复点少了第 3 步要覆盖的全部面板文件（实测确认）。
            # 这就是「把面板装在别的应用私有目录」（专家审计 m-7）的真实代价。
            sudo -n test -e "\$f" && sudo -n cp -a --parents "\$f" '$B/' || true; done; \
-    [ -d /opt/beszel/beszel_data ] && sudo -n cp -a /opt/beszel/beszel_data/pfan.html '$B/' 2>/dev/null || true; \
+    [ -d $PDIR ] && sudo -n cp -a $PDIR/pfan.html '$B/' 2>/dev/null || true; \
     echo '  备份: $B'; ls -la '$B' | tail -n +2 | sed 's/^/    /'"
 
 echo "== 2/5 传输 =="
@@ -142,7 +158,7 @@ S panel/vendor/uPlot.esm.js panel/vendor/uPlot.min.css panel/vendor/uPlot.LICENS
 # sudo: command not found + _w: unbound variable）。
 # 必须 sudo：面板目录 drwx------ root:root，非 sudo 读不到会【少算】，
 # 检查就会假通过（实测：非 sudo 报 3/3，看着齐了，其实一个面板文件都没备）。
-R "sudo -n sh '$STAGE/deploy/check-recovery-point.sh' '$B' > /tmp/pfan-rp.txt"
+R "sudo -n sh '$STAGE/deploy/check-recovery-point.sh' '$B' '$PANEL_DIR' > /tmp/pfan-rp.txt"
 R "cat /tmp/pfan-rp.txt" > "$HOME/.cache/pfan-rp.txt"
 _rpexp=$(sed -n "s/^EXPECTED //p" "$HOME/.cache/pfan-rp.txt")
 _rppre=$(sed -n "s/^PRESENT //p" "$HOME/.cache/pfan-rp.txt")
@@ -207,14 +223,14 @@ R "set -e
 
 # 面板静态文件（独立一段，路径写死，便于失败时定位）
 R "set -e
-    sudo -n install -m 644 $STAGE/index.html /opt/beszel/beszel_data/index.html
-    sudo -n install -m 644 $STAGE/styles.css /opt/beszel/beszel_data/styles.css
-    sudo -n install -m 755 $STAGE/app.js     /opt/beszel/beszel_data/app.js
-    sudo -n install -m 644 $STAGE/core.js    /opt/beszel/beszel_data/core.js
-    sudo -n mkdir -p /opt/beszel/beszel_data/vendor
-    sudo -n install -m 644 $STAGE/uPlot.esm.js   /opt/beszel/beszel_data/vendor/uPlot.esm.js
-    sudo -n install -m 644 $STAGE/uPlot.min.css  /opt/beszel/beszel_data/vendor/uPlot.min.css
-    sudo -n install -m 644 $STAGE/uPlot.LICENSE  /opt/beszel/beszel_data/vendor/uPlot.LICENSE
+    sudo -n install -m 644 $STAGE/index.html $PDIR/index.html
+    sudo -n install -m 644 $STAGE/styles.css $PDIR/styles.css
+    sudo -n install -m 755 $STAGE/app.js     $PDIR/app.js
+    sudo -n install -m 644 $STAGE/core.js    $PDIR/core.js
+    sudo -n mkdir -p $PDIR/vendor
+    sudo -n install -m 644 $STAGE/uPlot.esm.js   $PDIR/vendor/uPlot.esm.js
+    sudo -n install -m 644 $STAGE/uPlot.min.css  $PDIR/vendor/uPlot.min.css
+    sudo -n install -m 644 $STAGE/uPlot.LICENSE  $PDIR/vendor/uPlot.LICENSE
     rm -rf $STAGE
     echo '  面板 4 文件 + vendor 3 文件已安装'"
 

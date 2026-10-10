@@ -110,12 +110,13 @@ sec "T6: smoke 第 5 段必须比对真实部署件（线上服务 /opt/beszel/b
 # 注释里留着 beszel_data，T6 照样绿。判据必须是【真的执行了 sha256 比对】。
 _s5=$(awk '/部署件比对|^printf.*5\./,/^printf.*6\./' scripts/smoke.sh)
 if [ -z "$_s5" ]; then _s5=$(awk '/beszel_data/{f=1} f' scripts/smoke.sh | head -40); fi
-if printf '%s' "$_s5" | grep -vE '^[[:space:]]*#' | grep -qE 'sha256sum .*beszel_data'; then
-  ok "smoke.sh 对 beszel_data 真的执行 sha256 比对"
+# 路径现在是 $PANEL_DIR（从 platform.conf 派生），判据必须跟着走
+if printf '%s' "$_s5" | grep -vE '^[[:space:]]*#' | grep -qE 'sha256sum .*\$PANEL_DIR'; then
+  ok "smoke.sh 对面板目录真的执行 sha256 比对"
 else
-  ng "smoke.sh 没有对 beszel_data 执行 sha256 比对 —— 比对被删了也会报绿"
+  ng "smoke.sh 没有对面板目录执行 sha256 比对 —— 比对被删了也会报绿"
 fi
-if printf '%s' "$_s5" | grep -qE 'beszel_data/\$f|beszel_data/[a-z]+\.(html|js|css)'; then
+if printf '%s' "$_s5" | grep -qE '\$PANEL_DIR/\$f|\$PANEL_DIR/[a-z]+\.(html|js|css)'; then
   ok "第 5 段比对的是线上文件（逐个文件名）"
 else
   ng "第 5 段没有逐个比对线上文件"
@@ -192,18 +193,33 @@ if grep -E "^[[:space:]]*(S |sudo -n install )" scripts/deploy.sh | grep -qF "$V
 else
   ng "vendor 只出现在备份清单或注释里，没有被真正传输/安装 —— 部署后面板会全挂而闸门全绿"
 fi
-# 判据二：必须有 install 到 vendor 目录（备份 ≠ 安装）
-if grep -E 'install .*beszel_data/vendor/' scripts/deploy.sh | grep -q .; then
-  ok "deploy.sh 把 vendor 文件 install 到 beszel_data/vendor"
+# 判据二：必须有 install 到 vendor 目录（备份 ≠ 安装）。
+# 注意路径现在是 $PDIR（从 platform.conf 派生），不再字面量 beszel_data ——
+# 所以判据也必须跟着，否则改一次部署路径守卫就误报（这本身就是守卫该有的行为：
+# 路径从单一事实源派生后，硬编码字面量的守卫第一个失效）。
+if grep -E 'install .*\$PDIR/vendor/' scripts/deploy.sh | grep -q .; then
+  ok "deploy.sh 把 vendor 文件 install 到 \$PDIR/vendor"
 else
   ng "deploy.sh 没有 install 到 vendor 目录 —— 只有备份，线上仍然没有这个文件"
 fi
 # 判据三：必须真的 mkdir（首台机器上目录不存在时 install 会失败）
-if grep -E 'mkdir .*beszel_data(/vendor)?' scripts/deploy.sh | grep -q .; then
+if grep -E 'mkdir .*\$PDIR(/vendor)?' scripts/deploy.sh | grep -q .; then
   ok "deploy.sh 创建 vendor 目录"
 else
   ng "deploy.sh 没建 vendor 目录 —— 首台机器上 install 会失败"
 fi
+# 判据三之二：三处必须同源（deploy / smoke / pfanel 都从 platform.conf 派生）
+_d=$(grep -cE '^PANEL_DIR="\$\{PFAN_PANEL_DIR' scripts/deploy.sh 2>/dev/null || echo 0)
+_sm=$(grep -cE '^PANEL_DIR="\$\{PFAN_PANEL_DIR' scripts/smoke.sh 2>/dev/null || echo 0)
+_py=$(grep -cE 'PFAN_PANEL_DIR", _PLAT\.get\("PANEL_DIR"' server/pfanel.py 2>/dev/null || echo 0)
+if [ "$_d" -ge 1 ] && [ "$_sm" -ge 1 ] && [ "$_py" -ge 1 ]; then
+  ok "面板目录在 deploy/smoke/pfanel 三处同源派生（改 platform.conf 一处即可）"
+else
+  ng "面板目录不同源（deploy=$_d smoke=$_sm pfanel=$_py）—— 改一处会让另两处静默指错目录"
+fi
+grep -qE '^PANEL_DIR=' platform/platform.conf.example \
+  && ok "platform.conf.example 声明了 PANEL_DIR（单一事实源）" \
+  || ng "platform.conf.example 没有 PANEL_DIR —— 三处派生会各自落回默认"
 # 判据四：smoke 必须把 vendor 路由放进【被遍历的 URL 列表】。注意实际形态是
 # `for u in /pfan.css ... /pfan-vendor-uplot.js ...` —— 路径在 for 的列表里，
 # 请求由循环体内的 curl 发出。所以判据是"出现在 for 列表中"，不是"同行有 curl"。
@@ -234,10 +250,12 @@ sec "T12: 恢复点必须覆盖第 3 步覆盖的每一个路径（否则半途�
 # /etc/logrotate.d/pfan、/usr/local/lib/pfan/platform.sh、/etc/pfan/fan-candidates.txt
 # 与 4 个面板文件。中途失败 = 新二进制 + 旧面板的混合态，而重跑 deploy 会把混合态
 # 再备一次 —— 原始好状态永远丢失。
+# 面板路径在 deploy.sh 里已是 $PDIR（从 platform.conf 派生），所以这里比对的是
+# 变量形态的字面量 "$PDIR/..."，而不是展开后的绝对路径 —— 否则换一个部署目录
+# 守卫就误报（守卫必须跟着抽象走，否则它守的是一个已不存在的东西）。
 for path in /etc/logrotate.d/pfan /usr/local/lib/pfan/platform.sh \
-            /etc/pfan/fan-candidates.txt /opt/beszel/beszel_data/index.html \
-            /opt/beszel/beszel_data/styles.css /opt/beszel/beszel_data/app.js \
-            /opt/beszel/beszel_data/core.js; do
+            /etc/pfan/fan-candidates.txt '$PDIR/index.html' \
+            '$PDIR/styles.css' '$PDIR/app.js' '$PDIR/core.js'; do
   if grep -qF "$path" scripts/deploy.sh; then
     # 出现在备份段（step 1，mkdir 恢复点那一段）才算数；只在安装段出现是不够的
     # 备份段的窗口必须是【整个 step 1】，不能用硬编码行号——上一个版本用 1,32p，

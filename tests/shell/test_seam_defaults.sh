@@ -90,7 +90,31 @@ pin core/platform.sh 'PFAN_PLATFORM_CONF:-/etc/pfan/platform.conf' '平台配置
 pin core/pfand  'PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh' '加载器'
 pin core/pfan   'PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh' '加载器'
 pin core/pfan   'PFAN_THERMAL_DIR:-/sys/class/thermal' '热区目录'
-py_default PFAN_PANEL_DIR    '/opt/beszel/beszel_data'    '面板部署目录'
+# PANEL_DIR 的缺省现在来自 platform.conf（单一事实源），所以断言的是
+# 「pfanel.py 从 _PLAT 取」这个结构，而不再钉死具体路径 —— 换部署目录时
+# 改 platform/platform.conf.example 一处即可，这里不必同步（这正是本次重构的目的）。
+_pdir=$(python3 - <<'PYEOF'
+import ast
+src = open("server/pfanel.py", encoding="utf-8").read()
+for node in ast.walk(ast.parse(src)):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+       and node.func.attr == "get" and node.args:
+        a0 = node.args[0]
+        if isinstance(a0, ast.Constant) and a0.value == "PFAN_PANEL_DIR":
+            d = node.args[1]
+            if isinstance(d, ast.Call):
+                print("FROM_PLATCONF"); break
+PYEOF
+)
+if [ "$_pdir" = "FROM_PLATCONF" ]; then
+  ok "server/pfanel.py 的 PANEL_DIR 缺省来自 platform.conf（单一事实源）"
+else
+  ng "server/pfanel.py 的 PANEL_DIR 没从 platform.conf 取 —— 换部署目录要改多处"
+fi
+# 并且 platform.conf.example 必须真的声明了它
+grep -qE '^PANEL_DIR=.+' platform/platform.conf.example \
+  && ok "platform.conf.example 声明了 PANEL_DIR=$(sed -n 's/^PANEL_DIR=//p' platform/platform.conf.example | head -1)" \
+  || ng "platform.conf.example 没声明 PANEL_DIR —— 派生会落回代码里的兜底值"
 # _PLAT.get("DEV", ...) is not os.environ.get; same AST approach, different accessor
 plat_default(){ # plat_default <key> <expected-default> <why>
   local key="$1" want="$2" why="$3" got

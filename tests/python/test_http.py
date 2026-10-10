@@ -35,6 +35,7 @@ os.environ.setdefault("PFAN_CURVE_FILE", os.path.join(_STATE, "curve.state"))
 os.environ.setdefault("PFAN_CONF", os.path.join(_STATE, "pfand.conf"))
 
 import pfanel  # noqa: E402  （必须在环境变量之后导入）
+import pfan_platform  # noqa: E402
 
 
 def test_state_seam_defaults_equal_production():
@@ -65,8 +66,16 @@ def test_state_seam_defaults_equal_production():
         "PFAN_CONF": "/etc/pfand.conf",
         "PFAN_LOCK": "/run/pfanel.lock",
         "PFAN_DMESG": "dmesg",
-        "PFAN_PANEL_DIR": "/opt/beszel/beszel_data",
-    }
+      }
+    # PFAN_PANEL_DIR 的缺省不是字面量，而是 _PLAT.get("PANEL_DIR", <兜底>) ——
+    # 面板部署路径改成从 platform.conf 派生（单一事实源：deploy.sh / smoke.sh /
+    # pfanel.py 三处同源），所以这里不能按字面量比对，改为断言两件事：
+    #   ① 源码确实从 _PLAT 取；② platform.conf 里声明了它（缺了会落回代码兜底值）。
+    _src = inspect.getsource(pfanel)
+    assert '_PLAT.get("PANEL_DIR"' in _src, (
+        "PFAN_PANEL_DIR 的缺省不再来自 platform.conf —— 面板路径会有第二个事实源")
+    assert pfan_platform.get("PANEL_DIR", default=None) is not None, (
+        "platform.conf 没有声明 PANEL_DIR —— 派生会落回代码里的兜底值")
     for k, want in expected.items():
         assert k in found, f"源码里找不到 {k} 的缺省值（接缝被删了？）"
         assert found[k] == want, f"{k} 缺省值不是生产值: {found[k]!r}，期望 {want!r}"

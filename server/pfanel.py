@@ -61,7 +61,7 @@ CURVES = {
     "free": None,  # 自由模式：停守护，档位完全由用户定（仍需 s0i3 才生效）
 }
 # 静态面板目录（部署路径，非硬件平台路径）。可用 PFAN_PANEL_DIR 覆盖以便测试/迁移。
-PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", "/opt/beszel/beszel_data")
+PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", _PLAT.get("PANEL_DIR", "/opt/beszel/beszel_data"))
 # 随仓库一起部署的第三方资产（uPlot ESM + CSS）。
 # 面板过去从 cdn.jsdelivr.net 拉图表库：目标机是 LAN 设备，可能根本没有出口，
 # 那时 charts 会静默缺席而页面其余部分照常工作 —— 极难归因的"半坏"状态。
