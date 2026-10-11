@@ -1069,19 +1069,49 @@ async function loadChart() {
   const api = new Function("CHART_H", "ResizeObserver", body)(220, FakeRO);
   return { ...api, fire: () => ro.cb(), observed: () => ro.target };
 }
+// 替身必须是【像个真元素】，而不是"只够当前写法跑通"的最小子集。
+// 之前这里的 el 只有 getBoundingClientRect 与 parentElement：于是把 sizeOf 合法地
+// 改写成 closest('.chartbox')（同样正确、同样量的是 .chartbox）时，8 条行为测试
+// 全部以 `TypeError: el.closest is not a function` 崩掉 —— 它们不是"观察到了行为
+// 变化"，是替身自己缺方法。缺方法的替身让任何读取元素的新写法都变成红，于是
+// "本条仍绿"这种话当时是假的。现在 sizeOf/fitChart 会用到的 DOM 方法这里都有。
+function fakeNode(className, rect) {
+  return {
+    className,
+    parentElement: null,
+    getBoundingClientRect: () => ({ width: rect.width, height: rect.height }),
+    // 只认 `.class` 一种选择器 —— app.js 也只用这一种。不匹配必须返回 null
+    // （不是 undefined），`|| el` 兜底才和真 DOM 一样。
+    matches: (sel) => sel[0] === "." && className.split(/\s+/).includes(sel.slice(1)),
+    closest(sel) {
+      for (let e = this; e; e = e.parentElement) if (e.matches(sel)) return e;
+      return null;
+    },
+  };
+}
 // box 是 .chartbox 的矩形；el 自己的矩形【故意给不同的高度】—— 两者一旦相同，
 // "它到底量了谁" 这条断言就恒真，白测。差的那 32px 正是 .u-legend 的高度。
 function fakeEl(box) {
-  const el = { getBoundingClientRect: () => ({ width: box.width, height: box.height + 32 }) };
-  el.parentElement = { getBoundingClientRect: () => ({ width: box.width, height: box.height }) };
+  const el = fakeNode("chart", { width: box.width, height: box.height + 32 });
+  el.parentElement = fakeNode("chartbox", { width: box.width, height: box.height });
   return el;
 }
 function fakeU() { const calls = []; return { calls, setSize: (s) => calls.push(s) }; }
 
 describe("sizeOf 必须量父容器，不能量 uPlot 自己（专家审计 CRITICAL 1）", () => {
-  // 这条同时是 test_panel_split T4 那两条字面量哨兵的行为对偶：T4 认
-  // `parentElement` 这个写法，本条只认"量的不是 el 自己"这个事实 ——
-  // 换成同样正确的 closest('.chartbox') 时本条仍绿。
+  // 这条同时是 test_panel_split T4 那两条字面量哨兵的行为对偶：T4 只认
+  // `parentElement` 这个【拼写】，本条只认"量的不是 el 自己"这个事实。
+  // 换成同样正确的 closest('.chartbox') 时本条仍绿 —— 但这句话【只有在 fakeEl
+  // 真的实现了 closest 之后才成立】。2026-10-11 实测：补上 closest 之前，把
+  // sizeOf 合法改写成 closest('.chartbox')，这 8 条全部以
+  // `TypeError: el.closest is not a function` 崩掉，是替身缺方法，不是行为变了。
+  // 补上之后的实测分布（vitest）：
+  //   closest('.chartbox') || el（正确）      -> 127 passed
+  //   const box = el;            （量自己）    -> 6 failed
+  //   closest('.chart') || el    （选择器选到自己，仍是量自己） -> 6 failed
+  //   closest('.nope')  || el    （没匹配，退回自己）           -> 6 failed
+  // 后两种在旧替身上根本表达不出来（没有 closest，只会崩）——所以"替身要像个
+  // 真元素"不是洁癖：它决定了这条断言能不能分辨"量对了"和"量了个东西"。
   test("返回父容器的矩形，不是 #chN 自己的", async () => {
     const { sizeOf } = await loadChart();
     expect(sizeOf(fakeEl({ width: 640, height: 220 }))).toEqual({ width: 640, height: 220 });
