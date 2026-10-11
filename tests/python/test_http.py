@@ -707,3 +707,206 @@ def test_persisted_state_with_non_finite_float_level_falls_back_not_stops():
         _sp.run = _real_run
         pfanel.open = _real_open
         pfanel._APPLIED = False
+
+# ---------------- Task 3：set_curve 切 s0i3 必须确认守护真的起来了 ----------------
+# 旧 set_curve 丢弃 systemctl 的退出码就往下走：守护没起来（内核模块没加载、
+# 节点缺失、配置自检 fail-safe 直接 exit）时照样返回 ok、并把 s0i3 写进 curve.state。
+# 那两步刚把 _FSL 留在 0 上，守护不来就是风扇停转；而持久化又让每次 pfanel 重启
+# （含每次 deploy.sh）重放同一个坏状态 —— 模块没加载正是这台机器真出过的故障。
+#
+# 判据必须是【两个条件】而不是一个：守护 active 却正卡在 ensure_s0i3() 的握手窗口
+# （core/pfand: 先写 _FSL 1 0 再写 EC88）时 _FSL 就是 0，只查 systemctl 会放过它。
+
+
+class _Proc:
+    """subprocess.run 的最小替身：只提供本文件这批用例用得到的属性。
+
+    本机（Termux）根本没有 systemctl 这个二进制（`command -v systemctl` 为空），
+    不打桩的话 set_curve 里的 systemctl 调用会抛 FileNotFoundError。
+    """
+
+    def __init__(self, stdout="", returncode=0):
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = returncode
+
+
+def _systemctl_stub(unit_state="inactive", _real_run=None):
+    """subprocess.run 的替身：systemctl 返回 unit_state，其余命令照常真跑。
+
+    dmesg 必须【放行】给真跑：acpi() 靠它的 RESULT 行判定"这次调用拿到了新结果"，
+    一并打桩成 `true` 的话每次 acpi() 都会空转满 20×0.12s = 2.4s，一条用例十秒起。
+    """
+    if _real_run is None:
+        import subprocess as _sp
+
+        _real_run = _sp.run
+
+    def _fake_run(cmd, *a, **k):
+        if isinstance(cmd, (list, tuple)) and any("systemctl" in str(c) for c in cmd):
+            return _Proc(unit_state + "\n", 0 if unit_state == "active" else 3)
+        return _real_run(cmd, *a, **k)
+
+    return _fake_run
+
+
+def test_set_curve_rolls_back_when_daemon_does_not_come_up():
+    """守护起不来时 set_curve 必须回滚到 cool，且【不持久化】。
+
+    set_curve 丢弃 systemctl 的退出码，守护起不来时仍返回 {"ok": true}
+    并把该状态写进 curve.state —— 之后每次 pfanel 重启都重放同一个坏状态
+    （模块未加载就是这台机器真出过的故障）。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    # 起点显式写成 auto：断言"没有持久化 s0i3"才不会被上一条用例留下的值顺带满足
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "auto", "level": 0}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()
+    import builtins as _b
+    import subprocess as _sp
+
+    _real_run, _real_open = _sp.run, _b.open
+    # getattr 而不是直接取：实现落地前 pfanel 上还没有这个属性，
+    # 直接取会让本用例在 AttributeError 上死掉 —— 那样它证明的是"函数不存在"，
+    # 不是"守护没起来却把 s0i3 持久化了"这条缺陷本身。
+    _real_ready = getattr(pfanel, "_daemon_ready", None)
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    # 打桩 pfanel.open：只把 /var/log/pfanel.log 换成临时文件，其余照常
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    pfanel._daemon_ready = lambda *a, **k: False  # 设备上也读不回档位
+    try:
+        got = pfanel.set_curve("s0i3")
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        if _real_ready is None:
+            pfanel.__dict__.pop("_daemon_ready", None)
+        else:
+            pfanel._daemon_ready = _real_ready
+        pfanel._APPLIED = False
+    assert got == "cool", "守护没起来时 set_curve 返回 %r，必须是回滚后的 cool" % (got,)
+    st = pfanel.get_state()
+    assert st["curve"] == "cool", (
+        "守护起不来却把 %r 持久化了 —— 每次 pfanel 重启都会重放同一个坏状态"
+        % (st["curve"],)
+    )
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "回滚" in logtext, (
+        "回滚必须留日志，事后才分得清是守护没起来还是根本没检查：%r" % (logtext,)
+    )
+    writes = _real_open(dev, encoding="utf-8").read().splitlines()
+    assert any("0x79 0x00" in l for l in writes), (
+        "没有写 cool 的 EC 曲线值（0x79=0x00）—— 没回滚到 _FSL 0 也不会停转的曲线：%r"
+        % (writes,)
+    )
+
+
+def test_daemon_ready_needs_the_unit_and_the_device_to_agree():
+    """① systemctl active 与 ② 设备读回非零档位必须同时成立，缺一即未就绪。
+
+    只查 ① 的实现会在握手窗口里判成就绪：core/pfand 的 ensure_s0i3() 先写
+    `_FSL 1 0` 再写 EC88（中间 sleep 0.3），守护进程活着，_FSL 是 0。
+    三个方向都要压：只有守护 / 只有设备 / 两个都有。
+    """
+    import subprocess as _sp
+
+    _real_run, _real_ec = _sp.run, pfanel.get_ec76
+    state = {"unit": "active", "ec": 0}
+    pfanel.get_ec76 = lambda: state["ec"]
+    _sp.run = lambda *a, **k: _Proc(state["unit"] + "\n")
+    try:
+        assert not pfanel._daemon_ready(timeout_s=0.2, interval=0.05), (
+            "守护 active 但设备读回 0 档位时判成就绪 —— ensure_s0i3 的握手窗口会被放过"
+        )
+        state["ec"] = 30
+        assert pfanel._daemon_ready(timeout_s=0.2, interval=0.05), (
+            "守护 active 且设备读回 30 档位时必须判成就绪，否则正常切换会一直被回滚"
+        )
+        state["unit"] = "inactive"
+        assert not pfanel._daemon_ready(timeout_s=0.2, interval=0.05), (
+            "设备读回 30 但守护没 active 时判成就绪 —— 档位可能是【上一次】留下的"
+        )
+    finally:
+        _sp.run = _real_run
+        pfanel.get_ec76 = _real_ec
+
+
+def test_switching_to_a_firmware_curve_is_not_treated_as_failure():
+    """RF4：切到 quiet/cool 时守护【应该】正常退出 —— 新判据不能把它误判成失败而回滚。
+
+    core/pfand 在曲线非 s0i3 时 exit 0，这是设计。若 _daemon_ready 被套用到
+    quiet/cool 分支，这两条曲线会立刻被判成"守护没起来"然后被回滚成别的曲线 ——
+    用户选了固件接管，却拿到另一种曲线；而且每次切换都要白等满 timeout_s。
+
+    用【行为】而不是源码形状来断言（把 _daemon_ready 打桩成一被调用就 raise）：
+    源码字符串检查会被一次自动折行静默废掉 —— 那正是本文件
+    test_state_seam_defaults_equal_production 注释里记过的 2026-10-08 实例，
+    "格式化器悄悄废掉安全守卫，比没有守卫更危险"。
+    """
+
+    def _boom(*a, **k):
+        raise AssertionError(
+            "quiet/cool 分支调用了 _daemon_ready —— 固件曲线本就没有守护可等"
+        )
+
+    import subprocess as _sp
+
+    _real_run = _sp.run
+    _real_ready = getattr(pfanel, "_daemon_ready", None)
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    pfanel._daemon_ready = _boom
+    try:
+        assert pfanel.set_curve("quiet") == "quiet", "quiet 分支被新判据带跑了"
+        assert pfanel.set_curve("cool") == "cool", "cool 分支被新判据带跑了"
+    finally:
+        _sp.run = _real_run
+        if _real_ready is None:
+            pfanel.__dict__.pop("_daemon_ready", None)
+        else:
+            pfanel._daemon_ready = _real_ready
+        pfanel._APPLIED = False
+
+
+def test_s0i3_restore_must_not_write_a_level_from_the_backend():
+    """RF5：s0i3 下档位由守护写，后端【不该】自己写。
+
+    apply_persisted_state 在 curve==s0i3 时只重启守护就返回；如果这条分支也写了
+    档位，后端与守护会各写一次，而两者算出的 base/trim 可能不同 —— 表现为风扇抖动。
+    """
+    pfanel._APPLIED = False
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    with open(os.environ["PFAN_CURVE_FILE"], "w", encoding="utf-8") as fh:
+        json.dump({"curve": "s0i3", "level": 40}, fh)
+    open(dev, "w").close()
+    import builtins as _b
+    import subprocess as _sp
+
+    _real_run, _real_open = _sp.run, _b.open
+    _sp.run = _systemctl_stub("active", _real_run)
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    try:
+        pfanel.apply_persisted_state()
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel._APPLIED = False
+    fsl = [
+        l for l in _real_open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l
+    ]
+    # s0i3 分支会写 _FSL 1 0（交回控制权），但【不应】再写一个具体档位
+    nonzero = [l for l in fsl if not l.rstrip().endswith("_FSL 1 0")]
+    assert not nonzero, (
+        "s0i3 还原时后端写了具体档位 %r —— 应由守护写，否则两个写者会打架" % nonzero
+    )

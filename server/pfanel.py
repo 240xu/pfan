@@ -101,6 +101,47 @@ def get_curve():
     return get_state()["curve"]
 
 
+def _daemon_ready(timeout_s=5, interval=1):
+    """守护是不是真的接管了（s0i3 分支的判据）。
+
+    两个条件必须【同时】成立：
+      ① systemctl is-active pfand == active
+      ② get_ec76() 在设备上读到非零档位
+
+    只查 ① 不够。守护可能活着却正卡在 ensure_s0i3() 的握手窗口里
+    （core/pfand: ensure_s0i3 先写 _FSL 1 0 再写 EC88），而那个窗口内 _FSL 就是 0
+    —— 本项目反复踩到的就是它。那种情况下 ① 为真、风扇却转不起来，
+    判成"就绪"等于没检查。
+
+    ② 用 get_ec76() 而不是 get_level()：get_ec76 读 EC 0x76 = 实际转速百分比，
+    与 set_curve("auto") 分支判定"交回是否生效"用的是同一个判据（该分支的
+    `if not ec: acpi(FSL, "1 25")` 兜底），两处保持同一套读法；
+    get_level() 读的是 _FST 里的存档档位，守护没起来时
+    旧值照样非零，根本测不出这次切换有没有生效。
+    正常守护的档位下限是 25（core/pfand 的 L0/E/CAP 全部 >= 25），所以 ② 不会
+    因为"风扇本来就该慢"而误判。
+
+    刻意不调 daemon_alive()：它有 5s 缓存，而守护状态恰好刚被 restart 改动，
+    拿缓存当判据会把"没起来"读成"起来了"。
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            st = subprocess.run(
+                ["systemctl", "is-active", "pfand"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if (st.stdout or "").strip() == "active":
+                if get_ec76():
+                    return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
+
+
 def set_curve(name):
     """切曲线。quiet/s0i3/cool 都需要先 _FSL=0 交回控制权。"""
     if name not in CURVES:
@@ -134,7 +175,26 @@ def set_curve(name):
         # 必须【启动】守护 —— pfand 自己会 ensure_s0i3() 并按温度调档。
         acpi(FSL, "1 0")
         acpi(EC88, "4 181 0x79 0x%02X 0" % val)
+        # 旧实现丢弃 systemctl 的退出码就往下走，于是守护没起来（模块没加载、
+        # 节点缺失、配置自检 fail-safe 直接 exit）时照样返回 ok 并持久化 s0i3 ——
+        # 之后每次 pfanel 重启（含每次 deploy.sh）都重放同一个坏状态。
+        # 这两步刚把 _FSL 留在 0 上，守护不来就等于把风扇停在 0，所以必须验。
         subprocess.run(["systemctl", "restart", "pfand"], capture_output=True)
+        if not _daemon_ready():
+            # 先回滚再记日志：回滚是保命的那一步，不能让它被一次日志写失败顶掉
+            # （/var/log 不可写时 raise 出去，风扇就留在 _FSL 0 上没人管）。
+            rolled = set_curve("cool")  # cool 下固件接管，_FSL 0 不会停转
+            try:
+                with open("/var/log/pfanel.log", "a") as f:
+                    f.write(
+                        "%s s0i3 拉起 pfand 失败（守护未就绪或设备读回档位 0），已回滚到 %s\n"
+                        % (time.strftime("%Y-%m-%d %H:%M:%S"), rolled)
+                    )
+            except OSError:
+                pass
+            # 提前 return：不落到下面那行 save_state(curve=name)，
+            # 坏状态才不会被写进 curve.state。
+            return rolled
     else:
         # quiet / cool：固件自己的曲线接管，必须停守护
         # （守护写 _FSL 会让 EC 忽略 0x79，曲线就失效了）
