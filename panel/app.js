@@ -238,7 +238,11 @@ function fitChart(el, u) {
       if (t.width <= 0 || t.height <= 0) return;
       // 反馈回环的护栏：只把【不同于上次请求】的尺寸喂回去。
       // 没有这一条，任何"测量对象包含 uPlot 自身高度"的改动都会重新变成无界增长。
-      if (last.w === t.width && last.h === t.height) return;
+      // ⚠ 键名必须与 sizeOf() 的返回值一致（{width,height}）。之前这里写的是
+      // last.w / last.h，与返回对象的键永不匹配 —— undefined === number 恒假，
+      // 于是这条"反馈回环 fail closed"的护栏从不触发，而 commit b06a191 把它
+      // 描述成一道已经就位的第二道防线（2026-10-09 自审发现）。
+      if (last.width === t.width && last.height === t.height) return;
       last = t;
       u.setSize(t);
     }).observe(el.parentElement || el);

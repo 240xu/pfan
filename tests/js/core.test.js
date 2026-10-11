@@ -1021,3 +1021,141 @@ describe("esc 必须是真正的 HTML 转义器（专家审计 IMPORTANT 3）", 
     expect(esc(0)).toBe("0");
   });
 });
+
+// ===== fitChart 的反馈回环护栏：b06a191 把它写成了一条永不触发的死条件 =====
+//
+// 原文是 `if (last.w === t.width && last.h === t.height) return;`，而 sizeOf() 返回的是
+// {width, height}。last 是 sizeOf() 的返回值，last.w 因此恒为 undefined，而
+// undefined === number 恒假 ⇒ 整条条件恒假 ⇒ 早退【永不发生】⇒ ResizeObserver 每响一次
+// 就无条件 u.setSize(t)，哪怕测量值与上次请求的完全相同。b06a191 把这条写成
+// "任何未来的尺寸反馈回环都将 fail closed 的第二道防线"（2026-10-11 读两侧代码时发现）。
+//
+// 这里不 grep 源码：把 panel/app.js 里的 sizeOf/fitChart 两个函数【原样】取出来真的跑
+// （app.js 顶层会 boot() 并操作 DOM，被 import 会直接崩 —— 见 test_panel_split T5），
+// 断言的是 u.setSize 被调了几次、参数是什么。键名再漂一次，这里立刻红。
+
+// 先剥掉行注释再数括号：注释里可以出现任意字符（本次改动就往 fitChart 的护栏注释里写了
+// 一处 {width,height}）。不做字符串字面量解析 —— 这两个函数里没有含 // 的字符串，
+// 哪天出现了就得连字符串一起解析，到那天再加真 tokenizer，别悄悄用正则糊过去。
+function stripLineComments(src) {
+  return src.split("\n").map((l) => {
+    const i = l.indexOf("//");
+    return i < 0 ? l : l.slice(0, i);
+  }).join("\n");
+}
+function fnSource(src, name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0)
+    throw new Error(`panel/app.js 里找不到 function ${name} —— 这个测试必须跟着源码走`);
+  const open = src.indexOf("{", start);
+  let d = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "{") d++;
+    else if (src[i] === "}") { d--; if (d === 0) return src.slice(start, i + 1); }
+  }
+  throw new Error(`function ${name} 的大括号没配对`);
+}
+async function loadChart() {
+  const { readFileSync } = await import("node:fs");
+  const src = stripLineComments(
+    readFileSync(new URL("../../panel/app.js", import.meta.url), "utf8"));
+  const body = `${fnSource(src, "sizeOf")}\n${fnSource(src, "fitChart")}\n` +
+               `return { sizeOf, fitChart };`;
+  let ro = null;
+  class FakeRO {
+    constructor(cb) { this.cb = cb; ro = this; }
+    observe(target) { this.target = target; }
+  }
+  const api = new Function("CHART_H", "ResizeObserver", body)(220, FakeRO);
+  return { ...api, fire: () => ro.cb(), observed: () => ro.target };
+}
+// box 是 .chartbox 的矩形；el 自己的矩形【故意给不同的高度】—— 两者一旦相同，
+// "它到底量了谁" 这条断言就恒真，白测。差的那 32px 正是 .u-legend 的高度。
+function fakeEl(box) {
+  const el = { getBoundingClientRect: () => ({ width: box.width, height: box.height + 32 }) };
+  el.parentElement = { getBoundingClientRect: () => ({ width: box.width, height: box.height }) };
+  return el;
+}
+function fakeU() { const calls = []; return { calls, setSize: (s) => calls.push(s) }; }
+
+describe("sizeOf 必须量父容器，不能量 uPlot 自己（专家审计 CRITICAL 1）", () => {
+  // 这条同时是 test_panel_split T4 那两条字面量哨兵的行为对偶：T4 认
+  // `parentElement` 这个写法，本条只认"量的不是 el 自己"这个事实 ——
+  // 换成同样正确的 closest('.chartbox') 时本条仍绿。
+  test("返回父容器的矩形，不是 #chN 自己的", async () => {
+    const { sizeOf } = await loadChart();
+    expect(sizeOf(fakeEl({ width: 640, height: 220 }))).toEqual({ width: 640, height: 220 });
+  });
+  test("返回的键就是护栏要比的 width/height（键名漂移会静默关掉护栏）", async () => {
+    const { sizeOf } = await loadChart();
+    expect(Object.keys(sizeOf(fakeEl({ width: 640, height: 220 }))).sort())
+      .toEqual(["height", "width"]);
+  });
+});
+
+describe("fitChart 反馈回环护栏：尺寸没变时不得重复 setSize", () => {
+  test("测量值与上次请求相同 ⇒ 护栏早退（last.width/last.height 不是 last.w/last.h）", async () => {
+    const { fitChart, fire } = await loadChart();
+    const el = fakeEl({ width: 640, height: 220 });
+    const u = fakeU();
+    fitChart(el, u);
+    expect(u.calls).toEqual([{ width: 640, height: 220 }]);  // 首次装填，一次
+    fire(); fire();                                          // 尺寸没变，observer 又响了两次
+    expect(u.calls).toEqual([{ width: 640, height: 220 }]);   // 护栏早退，没有第二次 setSize
+  });
+
+  test("尺寸变了仍要 setSize（护栏不是『一律不调』）", async () => {
+    const { fitChart, fire } = await loadChart();
+    const el = fakeEl({ width: 640, height: 220 });
+    const u = fakeU();
+    fitChart(el, u);
+    el.parentElement.getBoundingClientRect = () => ({ width: 800, height: 220 });
+    fire();
+    expect(u.calls).toEqual([{ width: 640, height: 220 }, { width: 800, height: 220 }]);
+  });
+
+  test("变回旧值也要再调一次（比的是【上次请求】，不是【初始值】）", async () => {
+    const { fitChart, fire } = await loadChart();
+    const el = fakeEl({ width: 640, height: 220 });
+    const u = fakeU();
+    fitChart(el, u);
+    el.parentElement.getBoundingClientRect = () => ({ width: 800, height: 220 });
+    fire();
+    el.parentElement.getBoundingClientRect = () => ({ width: 640, height: 220 });
+    fire();
+    expect(u.calls).toEqual([
+      { width: 640, height: 220 }, { width: 800, height: 220 }, { width: 640, height: 220 },
+    ]);
+  });
+
+  test("只改高度也算变了（两个键都比，不是只比宽）", async () => {
+    const { fitChart, fire } = await loadChart();
+    const el = fakeEl({ width: 640, height: 220 });
+    const u = fakeU();
+    fitChart(el, u);
+    el.parentElement.getBoundingClientRect = () => ({ width: 640, height: 260 });
+    fire();
+    expect(u.calls.length).toBe(2);
+    expect(u.calls[1]).toEqual({ width: 640, height: 260 });
+  });
+
+  // 父容器 0×0 时 sizeOf 返回的是 {width:0, height:CHART_H} —— 高度被 `|| CHART_H`
+  // 兜成 220，宽度才真的是 0。所以这一支命中的是 t.width <= 0，不是两个维度都为 0。
+  // 名字照原样写（"测量为 0"）会让人以为宽度高度一起归零，那就白测了。
+  test("量不到宽度时既不装填也不重设（t.width <= 0 的早退仍在）", async () => {
+    const { fitChart, fire, sizeOf } = await loadChart();
+    const el = fakeEl({ width: 0, height: 0 });
+    expect(sizeOf(el)).toEqual({ width: 0, height: 220 });   // 高度被 CHART_H 兜住
+    const u = fakeU();
+    fitChart(el, u);
+    fire();
+    expect(u.calls).toEqual([]);
+  });
+
+  test("ResizeObserver 观察的是父容器，不是 #chN 自己", async () => {
+    const { fitChart, observed } = await loadChart();
+    const el = fakeEl({ width: 640, height: 220 });
+    fitChart(el, fakeU());
+    expect(observed()).toBe(el.parentElement);
+  });
+});
