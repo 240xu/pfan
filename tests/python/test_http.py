@@ -1153,7 +1153,9 @@ def test_auto_fallback_writes_the_min_safe_level_constant():
     open(log, "w").close()
     _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.time = _NoSleep()
-    pfanel.get_ec76 = lambda: 0        # 固件没接管 -> 必须兜底
+    # get_ec76 这里【不打桩】：夹具已改成生产形状（EC 读回裸整数），auto 分支刚写过
+    # `_FSL 1 0` 所以记住的档位是 0，真解析读回来的就是 0 -> 必须兜底。
+    # 曾经这里是 `lambda: 0`，于是整条兜底路径一次都没跑过真解析。
     pfanel.MIN_SAFE_LEVEL = 33         # 故意与 25 不同
     pfanel.open = lambda p, *a, **k: (
         _real_open(log, "a")
@@ -1166,7 +1168,6 @@ def test_auto_fallback_writes_the_min_safe_level_constant():
         _sp.run = _real_run
         pfanel.open = _real_open
         pfanel.time = _real_time
-        pfanel.get_ec76 = _real_ec
         pfanel.MIN_SAFE_LEVEL = _real_min
     assert got == "auto"
     last = _last_fsl(dev)
@@ -1328,4 +1329,334 @@ def test_s0i3_restore_must_not_write_a_level_from_the_backend():
     nonzero = [l for l in fsl if not l.rstrip().endswith("_FSL 1 0")]
     assert not nonzero, (
         "s0i3 还原时后端写了具体档位 %r —— 应由守护写，否则两个写者会打架" % nonzero
+    )
+
+
+# ---------------- 终审 Minor 3：预算守卫必须有覆盖 -----------------------------
+# `now + interval >= deadline` 是唯一拦着"预算用完了还再发一次 systemctl"的行。
+# 它此前是零覆盖：删掉它，全部测试照样绿。断言的对象是【尝试次数】而不是时间轴 ——
+# 时间轴本身就是被测代码算出来的，拿它当期望值等于自己验自己。
+
+
+def test_daemon_ready_never_starts_an_attempt_past_the_budget():
+    """剩余时间留不下一整次轮询时就不许再发一次 systemctl。
+
+    do-while 的结构决定了第一读永远会做（见上一条），所以能超额发起的只有
+    第二读及以后：某一次尝试结束时若 now + interval < deadline，循环就再睡一轮
+    并重试。少了 `now + interval >= deadline` 那一半，那个"再睡一轮"会在预算
+    刚好用尽时照发，于是多出一次【整次成本都落在预算之外】的尝试 ——
+    一次尝试的上界是 systemctl 的 5s 加 acpi() 的 2.4s 轮询。
+
+    断言写成"每一次尝试的开始时刻都严格早于 deadline"：这条在删掉守卫后立刻
+    为假（会多出一次恰好落在 deadline 上的尝试），而不是靠数次数那种脆弱写法。
+    虚拟时钟让本用例零等待。
+    """
+    import subprocess as _sp
+
+    _real_run, _real_ec, _real_time = _sp.run, pfanel.get_ec76, pfanel.time
+
+    class _Clock:
+        def __init__(self):
+            self.t = 1000.0
+
+        def sleep(self, s):
+            self.t += float(s)
+
+        def time(self):
+            return self.t
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    for timeout_s, interval, want in ((5, 1, 5), (2, 0.5, 4), (1, 0.25, 4)):
+        clock = _Clock()
+        attempts = []
+
+        def _run(*a, **k):
+            attempts.append(clock.t)
+            return _Proc("inactive\n")      # 永不 active -> 循环只受预算支配
+
+        pfanel.time = clock
+        pfanel.get_ec76 = lambda: None
+        _sp.run = _run
+        try:
+            got = pfanel._daemon_ready(timeout_s=timeout_s, interval=interval, settle=0)
+        finally:
+            _sp.run = _real_run
+            pfanel.get_ec76 = _real_ec
+            pfanel.time = _real_time
+        deadline = 1000.0 + timeout_s
+        assert attempts, "(%s,%s) 一次都没试过 —— 那是【没检查】不是【未就绪】" % (
+            timeout_s, interval)
+        assert max(attempts) < deadline, (
+            "有一次 systemctl 发起于 t=%r，已经在 deadline=%r 之外或正好压线"
+            "（timeout=%s, interval=%s）—— 预算用完之后还发起的尝试，"
+            "它的整次成本都落在预算之外" % (max(attempts), deadline, timeout_s, interval)
+        )
+        assert got is False, "守护全程 inactive 却判成就绪：%r" % (got,)
+        assert len(attempts) == want, (
+            "尝试次数是 %d，期望 %d（timeout=%s, interval=%s）"
+            % (len(attempts), want, timeout_s, interval)
+        )
+
+
+# ---------------- 终审 Minor 4：EC 读的 RESULT 形状，夹具而不是测试 -------------
+
+
+def _device_requests():
+    """假设备的【累计】请求流水（每一条 ACPI 写都留痕）。
+
+    不能用 _last_fsl：acpi() 每次以 "w" 打开设备，文件里只剩最后一次写入，而
+    交回后置条件的 EC 读恰好是最后一次 —— 于是"有没有兜底写"根本看不见。
+    """
+    with open(os.environ["PFAN_DMESG_LOG"], encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh if ln.strip()]
+
+
+def _reset_device_requests():
+    open(os.environ["PFAN_DMESG_LOG"], "w").close()
+
+
+def _fake_device_env(ec_word=None):
+    """把假设备的 EC 0x76 读回值设好；返回恢复函数。"""
+    prev = os.environ.get("PFAN_DMESG_EC")
+
+    def _restore():
+        if prev is None:
+            os.environ.pop("PFAN_DMESG_EC", None)
+        else:
+            os.environ["PFAN_DMESG_EC"] = prev
+
+    if ec_word is None:
+        os.environ.pop("PFAN_DMESG_EC", None)
+    else:
+        os.environ["PFAN_DMESG_EC"] = str(ec_word)
+    return _restore
+
+
+def test_get_ec76_parses_the_two_production_result_shapes():
+    """get_ec76 的真解析必须跑在生产形状上，而不是被夹具喂一个假形状。
+
+    pfanctl.c 的 dump_obj 按 ACPI 对象类型打印：ACPI_TYPE_INTEGER 打成【裸整数】，
+    ACPI_TYPE_PACKAGE 打成 `[a,b,c]`。实机上 _FSL 写与 _FST 读是 Package，
+    EC 0x76 读是 Integer。旧夹具对所有请求都吐 Package，于是 get_ec76 的
+    `int(r.split()[0])` 对着 `[0,40,4294967295]` 抛 ValueError、被 except 吞掉、
+    恒返回 None —— 本条在夹具修好之前必然是红的（它就是那次修复的验收）。
+
+    同一份 RESULT 值有两个读者：read_pkg 按 Package 解（get_level 用），
+    get_ec76 按 Integer 解。夹具若把两者混成一个形状，这两个读者就会对同一份
+    数据给出互相矛盾的答案，而且没人会发现。
+    """
+    restore = _fake_device_env(44 << 8)
+    try:
+        got = pfanel.get_ec76()
+        assert got == 44, (
+            "夹具报出 EC=11264(=44<<8) 时 get_ec76 必须解出 44，实际 %r —— "
+            "解析没走在生产形状上（裸整数），或者 byte1 的取法变了" % (got,)
+        )
+        ec_line = pfanel.acpi(pfanel.EC88, "4 181 118 0 0")
+        assert ec_line is not None and ec_line.strip().isdigit(), (
+            "EC 读的 RESULT 必须是【裸整数】（dump_obj 对 ACPI_TYPE_INTEGER 的打印），"
+            "实际拿到 %r —— 夹具形状回退成了 Package" % (ec_line,)
+        )
+        fst_line = pfanel.acpi(pfanel.FST)
+        assert pfanel.read_pkg(fst_line) and len(pfanel.read_pkg(fst_line)) >= 2, (
+            "_FST 读的 RESULT 必须是 Package（read_pkg 读得动），实际 %r" % (fst_line,)
+        )
+    finally:
+        restore()
+
+    for word, want, why in (
+        (0, 0, "EC=0 是【交回没生效】那一侧，必须原样解出 0 而不是 None"),
+        (4294967295, None, "0xFFFFFFFF 是固件的无效哨兵，必须解成 None"),
+    ):
+        restore = _fake_device_env(word)
+        try:
+            got = pfanel.get_ec76()
+            assert got == want, (
+                "夹具报出 EC=%r 时 get_ec76 必须是 %r，实际 %r —— %s"
+                % (word, want, got, why)
+            )
+        finally:
+            restore()
+
+
+def test_auto_handover_success_needs_no_fallback_write():
+    """auto 交回【成功】那一侧：真解析读到非零时不得有任何兜底写。
+
+    与 test_auto_fallback_writes_the_min_safe_level_constant 成对：那条走失败侧
+    （EC=0），这条走成功侧。两条都对着夹具跑真解析，所以"读不出来"与"读到 0"
+    不再是同一种情况、也不再靠打桩制造。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import subprocess as _sp
+
+    _real_run, _real_open, _real_time = _sp.run, builtins.open, pfanel.time
+    restore_ec = _fake_device_env(44 << 8)
+
+    class _NoSleep:
+        def sleep(self, _s):
+            return None
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "s0i3", "level": 0}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()
+    _reset_device_requests()
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    pfanel.time = _NoSleep()
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    try:
+        got = pfanel.set_curve("auto")
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel.time = _real_time
+        restore_ec()
+    assert got == "auto"
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "未交回成功" not in logtext, (
+        "EC 读到 44（固件已接管）却仍然判成未交回成功并写了兜底档位 —— "
+        "这会把每次正常交回都降成手动档位：%r" % (logtext,)
+    )
+    reqs = _device_requests()
+    fallback = "_FSL 1 %d" % pfanel.MIN_SAFE_LEVEL
+    assert not [r for r in reqs if r.endswith(fallback)], (
+        "EC=44 时设备上仍然收到了 %s —— 成功侧多写了一次兜底档位：%r"
+        % (fallback, reqs)
+    )
+    assert [r for r in reqs if r.endswith("_FSL 1 0")], (
+        "整次切换连交回本身的 _FSL 1 0 都没写出去，本用例什么也没验到：%r" % (reqs,)
+    )
+
+
+def test_cool_handover_success_needs_no_fallback_write():
+    """quiet/cool 交回【成功】那一侧：真解析读到非零时不得有兜底写。
+
+    与 test_rollback_to_cool_verifies_the_handover_before_returning 的第二条方向
+    互补：那条把 get_ec76 整个打桩来造"固件真的接管"，所以它验证的是
+    set_curve 的分支逻辑；本条让真的 acpi()、真的假 dmesg、真的解析跑一遍。
+    夹具修好之前本条不可能通过（真解析恒为 None，只能走兜底那一侧）。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import subprocess as _sp
+
+    _real_run, _real_open, _real_time = _sp.run, builtins.open, pfanel.time
+    restore_ec = _fake_device_env(44 << 8)
+
+    class _NoSleep:
+        def sleep(self, _s):
+            return None
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "nonexistent", "level": 0}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()
+    _reset_device_requests()
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    pfanel.time = _NoSleep()
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    try:
+        got = pfanel.set_curve("cool")
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel.time = _real_time
+        restore_ec()
+    assert got == "cool"
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "未交回成功" not in logtext, (
+        "EC 读到 44（固件已接管）却仍然判成未交回成功并写了兜底档位：%r" % (logtext,)
+    )
+    reqs = _device_requests()
+    fallback = "_FSL 1 %d" % pfanel.MIN_SAFE_LEVEL
+    assert not [r for r in reqs if r.endswith(fallback)], (
+        "EC=44 时设备上仍然收到了 %s —— 成功侧多写了一次兜底档位：%r"
+        % (fallback, reqs)
+    )
+    assert [r for r in reqs if r.endswith("_FSL 1 0")], (
+        "整次切换连交回本身的 _FSL 1 0 都没写出去，本用例什么也没验到：%r" % (reqs,)
+    )
+
+
+def test_firmware_curve_handover_waits_before_its_first_ec_read():
+    """终审 Minor 1：quiet/cool 的交回读之前必须等稳（原来注释里的理由是假的）。
+
+    这一分支原先没有等，且注释声称"写接口本来就已经 sleep 2s"。那是假的：
+    写接口的 time.sleep(2) 在 do_POST 里 set_curve()【返回之后】才执行。
+    判据是【顺序】：EC 读必须排在 settle 等待【之后】，不是"某处有个 sleep"。
+    """
+    import subprocess as _sp
+
+    _real_run, _real_open, _real_acpi, _real_time = (
+        _sp.run,
+        builtins.open,
+        pfanel.acpi,
+        pfanel.time,
+    )
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    events = []
+
+    class _Clock:
+        def sleep(self, s):
+            events.append(("sleep", round(float(s), 3)))
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    def _acpi(path, args=""):
+        if str(path) == pfanel.EC88 and "118" in str(args):
+            events.append(("ec76", args))
+            return "11264"          # 44 << 8：真解析也认这个形状
+        return _real_acpi(path, args)
+
+    open(dev, "w").close()
+    open(log, "w").close()
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    pfanel.time = _Clock()
+    pfanel.acpi = _acpi
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    try:
+        got = pfanel.set_curve("cool")
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel.acpi = _real_acpi
+        pfanel.time = _real_time
+    assert got == "cool"
+    kinds = [e[0] for e in events]
+    assert "ec76" in kinds, "本用例根本没走到读 EC 那一步：%r" % (events,)
+    first_ec = kinds.index("ec76")
+    waits = [v for k, v in events[:first_ec] if k == "sleep"]
+    assert waits, (
+        "第一读 EC 之前一次都没等 —— 从 s0i3 切过来时，过早的读拿到的是"
+        "【切换前】的非零转速，楔住的 EC 会被判成【交回成功】、兜底不写，"
+        "而 EC 还停在 s0i3、_FSL 停在 0（= 停转）。事件=%r" % (events,)
+    )
+    assert max(waits) >= pfanel.HANDOVER_SETTLE_S, (
+        "第一读之前最长只等了 %rs，低于 settle 口径 %rs —— 等得不够久等于没等"
+        % (max(waits), pfanel.HANDOVER_SETTLE_S)
     )

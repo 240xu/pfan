@@ -1,8 +1,8 @@
 #!/bin/sh
 # 伪 dmesg：把假设备上【最后一次 ACPI 请求】翻译成 pfanctl 的 RESULT 行。
 #
-# 必须与真驱动语义一致的四点：
-#   1) 行格式 `pfanctl: RESULT [0,<level>,4294967295]`（实机抓到的形状）；
+# 必须与真驱动语义一致的五点：
+#   1) 行格式有【两种】，按请求类型决定（见下面「RESULT 有两种形状」）；
 #   2) 时间戳单调递增 —— pfand 用它判定"有没有新结果"，不递增会永远等不到；
 #   3) 请求是 _FSL 1 N 就记住档位，请求是 _FST 就按记住的档位作答；
 #   4) fail-closed（P1 复审 I1）：只对【已知好路径上的合法请求】产生 RESULT，
@@ -10,17 +10,37 @@
 #      真驱动同语义：pfanctl.c 的 get_handle 失败分支只 pr_err、不打 RESULT。
 #      没有这条，写失败的死设备照样吐出"新鲜"RESULT，getL 就会把陈旧档位
 #      当成实际值 —— E2E 层永远抓不到 fail-open（2026-10-06 复审 I1）。
+#   5) EC 读（0x76）不更新记住的档位 —— 那不是档位写入。
+#
+# RESULT 有两种形状（2026-10-11 终审 Minor 4 补正；旧夹具只有一种，是错的）：
+#   pfanctl.c 的 dump_obj 按 ACPI 对象类型打印 —— ACPI_TYPE_PACKAGE 打成
+#   `[a,b,c]`，ACPI_TYPE_INTEGER 打成【裸整数】。实机抓到的 RESULT 因此有两种：
+#     · _FSL 写、_FST 读  ->  Package  ->  `RESULT [0,<level>,4294967295]`
+#     · EC 0x76 读        ->  Integer  ->  `RESULT <word>`（没有方括号）
+#   旧夹具对【所有】请求都吐 Package，于是 pfanel.get_ec76 的
+#   `int(r.split()[0])` 对着 `[0,40,4294967295]` 抛 ValueError 被吞掉、恒返回
+#   None —— set_curve 的两条交回后置条件于是永远只看得到"读不出来"那一侧，
+#   "固件真的接管了"那一侧从来没跑过真解析。生产上 EC 读确实返回 Integer，
+#   所以不实的是夹具、不是 get_ec76。
+#   EC 【写】（0x79）保持 Package：没有证据说明它返回什么，而仓里没有任何消费者
+#   解析 EC 写的 RESULT（acpi() 只要求"有一条新 RESULT"），所以不改 ——
+#   改它就是凭空发明。
 #
 # 已知好路径 = 平台配置里的两条（pfanctl.c get_handle 能解析的同两条）：
 #   FAN_DEVICE: `_FSL 1 <n>`（记档）与 `_FST`（读档）
-#   EC_ROOT:    `EC88 <args>`（EC 寄存器访问；pfanel 读 ec76 依赖它，
-#               且不更新记住的档位 —— 那不是档位写入）
+#   EC_ROOT:    `EC88 <args>`（EC 寄存器访问；pfanel 读 ec76 依赖它）
+#
+# 额外的测试接缝（只在 EC 读上生效；生产没有对应概念，缺省即不设）：
+#   PFAN_DMESG_EC —— 直接指定 EC 0x76 读回的那个字。给了就用它，不给就按
+#   "风扇转在最后写下的档位上"作答（假设备没有固件，这是唯一自洽的模型）。
+#   用途：让"固件已经接管"那一侧也能跑【真解析】，而不是把 get_ec76 整个打桩。
 #
 # 用 #!/bin/sh 而非 bash：本脚本被 pfand 直接 exec，而 Termux 没有 /bin/bash、
 # 也没有 /usr/bin/env（发行版才有）。只用 POSIX 特性。
 #
 # 环境：PFAN_DEV（假设备文件）、PFAN_DMESG_STATE（记住的档位）、PFAN_DMESG_LOG（请求流水）
 #       PFAN_PLATFORM_CONF（已知好路径的事实源：FAN_DEVICE / EC_ROOT）
+#       PFAN_DMESG_EC（可选：EC 0x76 读回的字，见上）
 set -u
 [ -n "${PFAN_DEV:-}" ]         || { echo "fake dmesg: 缺 PFAN_DEV" >&2; exit 1; }
 [ -n "${PFAN_DMESG_STATE:-}" ] || { echo "fake dmesg: 缺 PFAN_DMESG_STATE" >&2; exit 1; }
@@ -46,11 +66,11 @@ strip(){ printf '%s' "$1" | sed 's/^\\*//'; }
 fan=$(strip "$(conf_get FAN_DEVICE)")
 ec=$(strip "$(conf_get EC_ROOT)")
 
-mode=bad; rpath=""; lvl=""
+mode=bad; rpath=""; lvl=""; ecargs=""
 case "$req" in
   *._FSL\ 1\ *) mode=fsl; rpath=${req%%._FSL*}; lvl=${req##* } ;;
   *._FST)       mode=fst; rpath=${req%%._FST} ;;
-  *.EC88\ *)    mode=ec;  rpath=${req%%.EC88*} ;;
+  *.EC88\ *)    mode=ec;  rpath=${req%%.EC88*}; ecargs=${req#*.EC88 } ;;
 esac
 rpath=$(strip "$rpath")   # 请求侧的前导反斜杠同样剥掉，再与 conf 侧比较
 
@@ -73,4 +93,19 @@ if [ "$emit" -ne 1 ]; then
 fi
 
 lvl=$(cat "$PFAN_DMESG_STATE" 2>/dev/null || echo 0)
+# $(( )) 是八进制语义（010 -> 8），前导零必须先剥掉，否则算出的字节是错的。
+lvl=$(printf '%s' "$lvl" | sed -e 's/^0*//' -e 's/^$/0/')
+case "$lvl" in *[!0-9]*) lvl=0 ;; esac
+
+# EC 读（0x76）走另一种形状：裸整数。byte1 才是转速百分比
+# （pfanel.get_ec76 取 (v >> 8) & 0xFF），所以要左移 8 位才对得上它的读法。
+case "$mode|$ecargs" in
+  'ec|4 181 118'|'ec|4 181 118 '*)
+    if [ -n "${PFAN_DMESG_EC:-}" ]; then
+      echo "[${CNT}.000000] pfanctl: RESULT ${PFAN_DMESG_EC}"
+    else
+      echo "[${CNT}.000000] pfanctl: RESULT $((lvl << 8))"
+    fi
+    exit 0 ;;
+esac
 echo "[${CNT}.000000] pfanctl: RESULT [0,${lvl},4294967295]"
