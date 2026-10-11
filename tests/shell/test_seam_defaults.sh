@@ -90,6 +90,11 @@ pin core/platform.sh 'PFAN_PLATFORM_CONF:-/etc/pfan/platform.conf' '平台配置
 pin core/pfand  'PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh' '加载器'
 pin core/pfan   'PFAN_PLATFORM_SH:-/usr/local/lib/pfan/platform.sh' '加载器'
 pin core/pfan   'PFAN_THERMAL_DIR:-/sys/class/thermal' '热区目录'
+# PANEL_DIR 的出厂值也从这里取：detect 把它写进生成的 platform.conf，pfanel.py
+# 再从那份配置读（见 9eb0043 与本轮 Task 3）。指错 example 会让 detect 写出的
+# PANEL_DIR 与 deploy.sh / smoke.sh 读的那个 example 分叉 —— 正是本文件开头
+# 拿 PFAN_LOCK 分叉当反面教材的那一类，所以按同样的 `pin` 钉住。
+pin core/pfan   'PFAN_PLATFORM_EXAMPLE:-$(dirname "$0")/../platform/platform.conf.example' 'detect 写 PANEL_DIR 的取值来源'
 # PANEL_DIR 的缺省现在来自 platform.conf（单一事实源），所以断言的是
 # 「pfanel.py 从 _PLAT 取」这个结构，而不再钉死具体路径 —— 换部署目录时
 # 改 platform/platform.conf.example 一处即可，这里不必同步（这正是本次重构的目的）。
