@@ -471,7 +471,7 @@ def test_free_curve_must_not_break_persisted_state_restore():
 # 也就是从没按过档位按钮的【默认状态】—— 旧实现是掉进"无可恢复"的。
 
 def test_persisted_state_with_zero_level_falls_back_not_stops():
-    """level=0 不是"有意的 0"，而是"从没按过档位按钮"的默认状态（pfanel.py:79）。
+    """level=0 不是"有意的 0"，而是"从没按过档位按钮"的默认状态（pfanel.py:82）。
 
     set_level 把档位钳在 >=1，所以 0 永远不是一次有意的选择。旧实现
     `if st.get("level"):` 把 0 当成"无可恢复"，于是 free 曲线在每次 pfanel
@@ -506,22 +506,33 @@ def test_persisted_state_with_zero_level_falls_back_not_stops():
     )
 
 
-def test_persisted_state_with_missing_level_falls_back_too():
-    """state 里根本没有 level 键 —— 走 .get() 的 None 分支，与 0 同类。"""
+def test_persisted_state_with_null_level_falls_back_not_stops():
+    """state 里 level 显式为 null —— 这是唯一能走到 int() 的 TypeError 分支的输入。
+
+    别把它和"缺 level 键"混为一谈：get_state() 写的是 d.get("level", 0)（pfanel.py:82），
+    所以**缺键得到的是 0，不是 None**。缺键那条与 level=0 的设备输出逐字节相同，
+    由上一条测试覆盖；把它当"缺键测试"写不会多覆盖任何分支，只会让 docstring 说谎。
+
+    只有 JSON 里真的写了 null 才会变成 Python 的 None，于是 int(None) 抛 TypeError。
+    这一条是 except 子句里 TypeError 三个字唯一的测试依据：把它收窄成 ValueError，
+    本测试立刻转红。
+    """
     pfanel._APPLIED = False
     curve_file = os.environ["PFAN_CURVE_FILE"]
     dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
     with open(curve_file, "w", encoding="utf-8") as fh:
-        json.dump({"curve": "free"}, fh)          # 故意没有 level
+        json.dump({"curve": "free", "level": None}, fh)  # 必须真的写 null
     open(dev, "w").close()
+    open(log, "w").close()
     import builtins as _b
     import subprocess as _sp
     import re as _re
+
     _real_run, _real_open = _sp.run, _b.open
     _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
     pfanel.open = lambda p, *a, **k: (
-        _real_open(os.path.join(os.path.dirname(dev), "pfanel.log"), "a")
-        if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+        _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
     try:
         pfanel.apply_persisted_state()
     finally:
@@ -531,7 +542,17 @@ def test_persisted_state_with_missing_level_falls_back_too():
     writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
               if "_FSL" in l]
     last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
-    assert last and int(last[-1]) >= 25, "缺 level 键时也必须回落，而不是留下停转"
+    assert last and int(last[-1]) == 25, (
+        "level=null 时最终档位是 %r，必须与 level=0 同类回落到 25 而不是 0（0 = 停转）"
+        % (last[-1] if last else None,)
+    )
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "还原失败" not in logtext, (
+        "int(None) 的 TypeError 冒进了外层 except，日志=%r" % (logtext,)
+    )
+    assert "None" in logtext and "回落" in logtext, (
+        "回落既要写进日志、也要带上坏值本身：%r" % (logtext,)
+    )
 
 
 # ---------------- 续：存档 level 不是整数（"abc"）同样必须回落，而不是留下停转 ----------------
@@ -590,3 +611,99 @@ def test_persisted_state_with_non_integer_level_falls_back_not_stops():
         "回落既要写进日志、也要带上坏值本身，否则事后分不清是存档坏了还是设备坏了：%r"
         % (logtext,)
     )
+
+
+# ---------------- 续：bool 与非有限浮点 —— 分别对应 isinstance 守卫与 OverflowError ----------------
+# 上一条"abc"只覆盖 except 子句里的 ValueError 一个字。子句里另外两个字此前【零覆盖】：
+# TypeError（唯一能走到的输入是 JSON 的 null）和 OverflowError（NaN / ±Infinity）。
+# bool 则是更靠前的一层：它在 int() 之前就被 isinstance 挡掉，走不到任何 except。
+
+
+def test_persisted_state_with_bool_level_falls_back_not_stops():
+    """state 里 level 是 true —— bool 是 int 的子类，int(True) == 1，能顺利通过 >=1 检查。
+
+    不单独挡掉的话会写出 _FSL 1 1：不是 0，但 1 档离停转只差一步，而 true 显然不是档位。
+    删除 isinstance(_lv, bool) 这一层，本测试立刻转红。
+    """
+    pfanel._APPLIED = False
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free", "level": True}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()
+    import builtins as _b
+    import subprocess as _sp
+    import re as _re
+
+    _real_run, _real_open = _sp.run, _b.open
+    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+    try:
+        pfanel.apply_persisted_state()
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel._APPLIED = False
+    writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
+              if "_FSL" in l]
+    last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
+    assert last and int(last[-1]) == 25, (
+        "level=true 时最终档位是 %r，必须回落到 25 而不是 1（1 档离停转只差一步）"
+        % (last[-1] if last else None,)
+    )
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "还原失败" not in logtext, (
+        "bool 不该走 except 也不该停转，日志=%r" % (logtext,)
+    )
+    assert "True" in logtext and "回落" in logtext, (
+        "回落既要写进日志、也要带上坏值本身：%r" % (logtext,)
+    )
+
+
+def test_persisted_state_with_non_finite_float_level_falls_back_not_stops():
+    """state 里 level 是 NaN / Infinity —— Python 的 json 默认 allow_nan=True，
+    这三个都是**合法 JSON 字面量**：手改文件写得进去，json.loads 也读得回来。
+
+    int(nan) 抛 ValueError（与 "abc" 同一类），int(±Infinity) 抛 OverflowError ——
+    后者是 except 子句里 OverflowError 三个字唯一的测试依据：把子句收窄成
+    except (TypeError, ValueError)，本测试转红而 "abc" 那条仍然绿。
+    """
+    pfanel._APPLIED = False
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import builtins as _b
+    import subprocess as _sp
+    import re as _re
+
+    _real_run, _real_open = _sp.run, _b.open
+    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+    try:
+        for raw, label in ((float("nan"), "NaN"), (float("inf"), "Infinity")):
+            pfanel._APPLIED = False
+            with open(curve_file, "w", encoding="utf-8") as fh:
+                json.dump({"curve": "free", "level": raw}, fh)  # allow_nan 默认 True
+            open(dev, "w").close()
+            open(log, "w").close()
+            pfanel.apply_persisted_state()  # 抛异常本身就是缺陷
+            writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
+                      if "_FSL" in l]
+            last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
+            assert last and int(last[-1]) == 25, (
+                "level=%s 时最终档位是 %r，必须回落到 25 而不是 0（0 = 停转）"
+                % (label, last[-1] if last else None,)
+            )
+            logtext = _real_open(log, encoding="utf-8").read()
+            assert "还原失败" not in logtext, (
+                "int(%s) 抛的异常冒进了外层 except，日志=%r"
+                % (label, logtext,)
+            )
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel._APPLIED = False

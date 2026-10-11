@@ -418,7 +418,7 @@ def apply_persisted_state():
             # 异常在 EC88 展开时就抛了，档位永远不恢复）。
             subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
             # level=0 与 level 缺失都不是"有意的 0"：set_level() 把档位钳在 >=1，
-            # 所以 0 永远只意味着"从没按过档位按钮"（缺省值见 :79）。旧实现把它当成
+            # 所以 0 永远只意味着"从没按过档位按钮"（缺省值见 :82）。旧实现把它当成
             # "无可恢复"，于是 free 曲线在每次 pfanel 启动（含每次 deploy.sh）之后都把
             # 风扇留在 _FSL 1 0 —— 而 s0i3 下 0 就是停转（实测，spec F2）。
             # 回落值取 MIN_SAFE_LEVEL（FPS 表最低档），并且必须真的写出去。
