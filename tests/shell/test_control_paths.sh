@@ -179,31 +179,7 @@ out=$(timeout 25 env PFAN_PLATFORM_CONF="$T/mn2.conf" PFAN_LOCK="$T/lock" PFAN_L
       bash core/pfand 2>&1); rc=$?
 chk_missing "$T/mn.log2" "$T/gone2" "候选分支节点缺失" $rc
 
-echo "== T12: 配置自校验必须挡住会【停转】的下界（E/CAP/L* ≤ 0 或低于 L0_MIN）=="
-# 专家审计 C1/C2 实测：E=0 时自检放行，随后 setL "$E" 在最热温度写 _FSL 1 0；
-# CAP=0 且 L*=0 时 apply() 钳到 0，d=0 < DEAD 于是【不写不记日志】，风扇停在
-# ensure_s0i3 握手留下的 0 上。自检原本只查"是不是数字"+三条关系。
-_rc=/root/backups/_cfgchk-probe
-grep -qE 'L0.*< *25|_cfg_bad.*L0|\[ "\$E" -lt' core/pfand && ok "pfand 自检含档位下界判断" || ng "pfand 自检没有档位下界判断（E=0 / CAP=0 可通过 → 停转）"
-grep -qE '\[ "\$E" -lt ' core/pfand && ok "显式检查 E 的下界" || ng "没有显式检查 E 的下界"
-
-echo "== T13: 配置自检必须拒绝 E <= CAP（否则最热温度写一个比日常上限更弱的档，日志还写「立即满速」）=="
-# 复核自 spec F4（实测）：E=50 CAP=70 被自检放行，启动对齐在 85°C 直接写 _FSL 1 50
-# 并记「立即满速 50%」—— 应急比日常上限 CAP=70 还弱，日志却声称满速。
-# 既是欠冷却（最热时风扇比平时上限还慢）也是谎报（日志说"立即满速"）。
-# 面板那份 validate_params 已就同一条判据同步（server/pfan_core.py，E <= CAP）；
-# 守护这份自检是它的对偶 —— 任一边放过 E<=CAP，这个洞就会重新打开。
-#
-# 判据全部落在【设备侧】与【日志】上，一行源码都不看：
-#   a) 日志记「不自洽」，且【没有】参数来源横幅（横幅只在自检通过、进主循环之后才打）
-#   b) 假设备收到的最后一次请求是 _FSL 1 100（fail-safe 满速）
-#   c) 假设备的回读流水里一条 _FST 都没有（进了主循环就必然有一次 getL 回读）
-# 上面 T12 是个 grep 源码的守卫：判据被整段删掉它照样绿。这里不能重复那个错，
-# 所以断言的是真实守护在假设备上的行为。
-#
-# 产物一律留在用例目录里由断言现读，不用 | 分隔的结果串往回传 —— 结果串里的 | 一旦
-# 进到 pattern 里就会被当成 case 的分支分隔符，把判据变成永远不触发的死代码。
-_ecfg_run(){ # _ecfg_run <用例目录> <E> <CAP> <超时秒>；跑真实守护，产物留在用例目录
+_ecfg_run(){ # _ecfg_run <用例目录> <E> <CAP> <超时秒> [额外sed]；跑真实守护，产物留在用例目录
   local d="$1" e="$2" cap="$3" tmo="$4"
   mkdir -p "$d"
   : > "$d/dev"; : > "$d/dl"; : > "$d/out"; : > "$d/pfand.log"
@@ -218,9 +194,16 @@ FAN_DEVICE=\_SB.PCI0.LPCB.EC0.TFN1
 THERMAL_ZONE=$d/temp
 DEV=$d/dev
 PEOF
-  # 只换 E/CAP 两行，其余参数全部沿用出厂配置：DWELL/IV 等照常，
+  # 只换显式给出的那几个键，其余参数全部沿用出厂配置：DWELL/IV 等照常，
   # 免得用例顺手放宽了别的条件、把失败原因搅浑。
-  sed "s/^E=100$/E=$e/; s/^CAP=70$/CAP=$cap/" config/pfand.conf.example > "$d/conf"
+  # 第 5 个参数（可选）= 额外的 sed 表达式，用来改 L0..L5 这类【没有形参】的键。
+  # 必须用 ";" 分隔：GNU sed 会把 s/// 后面那个空格读成 flag，一个空格就报
+  # "unknown option to `s'"。后果不是"安静地过"而是更阴的一种：sed 整条失败、
+  # $d/conf 留空，守护退回脚本内置缺省值，于是【这条用例根本没被构造出来】，
+  # 断言会以"守卫坏了"的样子报错，误导排查方向（2026-10-11 写本用例时先踩过）。
+  local expr="s/^E=100$/E=$e/; s/^CAP=70$/CAP=$cap/"
+  [ -n "${5:-}" ] && expr="$expr; $5"
+  sed "$expr" config/pfand.conf.example > "$d/conf"
   timeout "$tmo" env PFAN_PLATFORM_CONF="$d/plat.conf" PFAN_DEV="$d/dev" \
     PFAN_DMESG=fake/bin/dmesg PFAN_DMESG_STATE="$d/st" PFAN_DMESG_LOG="$d/dl" \
     PFAN_LOCK="$d/lock" PFAN_CONF="$d/conf" PFAN_CURVE_FILE="$d/curve" \
@@ -233,6 +216,128 @@ PEOF
 _ecfg_rc(){ cat "$1/rc" 2>/dev/null || echo 缺; }                # 真实守护的退出码
 _ecfg_cnt(){ grep -c "$2" "$1/pfand.log" 2>/dev/null || true; }   # 日志命中次数
 _ecfg_fsl(){ grep '_FSL 1 ' "$1/dl" 2>/dev/null | tail -1; }      # 假设备累计请求流水末条
+# 下界判据有两种字面（core/pfand 里 E/CAP/L0 一条、L1..L5 一条），
+# 所以「有没有命中下界判据」必须用二选一，不能只认其中一句。
+_ecfg_bnd(){ grep -c '档位下界非法\|低于 _FPS 最低档 25' "$1/pfand.log" 2>/dev/null || true; }
+
+echo "== T12: 档位下界守卫必须是【行为】不是 grep —— E/CAP/L0..L5 任一 < 25 都必须真的挡住停转 =="
+# ---- 为什么原来那两条 grep 是假的（2026-10-09 的 319fdc3 加进来的）----
+# 原文是 grep -qE 'L0.*< *25|_cfg_bad.*L0|\[ "\$E" -lt' core/pfand，验的是
+# "某段文本在文件里"，不是"行为成立"。实测把它换成
+#     if [ "$E" -lt 25 ] || [ "$CAP" -lt 25 ] || [ "$L0" -lt 25 ]
+#  -> if [ "$E" -lt 0 ]  || [ "$CAP" -lt 0 ]  || [ "$L0" -lt 0 ]
+# （等于把整条下界检查关掉、恢复"最热温度写 _FSL 1 0"的停转缺陷）之后，
+# 整份测试照样 fails=0。T13 的注释已经写过"守卫被整段删掉它照样绿"，
+# 这里是同一个错的第二份拷贝。
+#
+# ---- 判据全在运行时 ----（复用下面那套 _ecfg_run 假设备，一行源码都不看）
+# 每例都跑【真实守护】（85°C，>= EMERG），然后断言四件事：
+#   a) 假设备最后收到的是 ._FSL 1 100 —— 绝不能是 _FSL 1 0（0 就是风扇停转）
+#   b) 日志命中的必须是【本守卫自己那一条】判据，不是隔壁的关系判据顺手抓的
+#   c) 没有参数来源横幅 + 一次 _FST 都没回读 => 确实在进主循环【之前】就退出了
+#   d) 退出码非 0 且不是 124（124 = 被 timeout 杀 = 还活着在主循环里）
+#
+# ---- 两条必须说在前面的话 ----
+# 1) 【设备收到 100 这件事本身分辨不出接受与拒绝】：合法配置在 85°C 走应急分支
+#    也是 setL "$E" = _FSL 1 100，字节一模一样（T13c 实测）。所以 a 是安全契约
+#    （绝不能写出 0），分辨靠 b/c/d。
+# 2) b 不能弱写成"日志里有某句下界的话"：E=0 / CAP=0 还会同时被 E<=CAP 的关系
+#    判据抓住（core/pfand:203-207）。那样的话把下界那行整个改成 -lt 0 之后，
+#    E=0 照样被拒、行为一模一样 —— 那样的断言在测关系判据，不是在测本守卫。
+#    所以每一例都点名【该命中哪一条】，并用 l0_24/l5_24（没有任何别的判据会碰）
+#    与 iso（关系判据全程沉默）把两条下界检查各自单独钉住。
+_chk_bnd_reject(){ # <名字> <E> <CAP> <额外sed> <该命中的下界判据>
+  local name="$1" e="$2" cap="$3" extra="$4" want="$5" d="$T/t12.$1"
+  _ecfg_run "$d" "$e" "$cap" 12 "$extra"
+  local devtail rc nb nl nr
+  devtail=$(tail -1 "$d/dev" 2>/dev/null)
+  rc=$(_ecfg_rc "$d"); nb=$(_ecfg_cnt "$d" "$want"); nl=$(_ecfg_cnt "$d" '参数来源')
+  nr=$(grep -c '_FST' "$d/dl" 2>/dev/null || true)
+  nb=${nb:-0}; nl=${nl:-0}; nr=${nr:-0}
+  case "$devtail" in                                              # a) 设备侧
+    *'._FSL 1 100') ok "$name: 假设备最后收到的是 fail-safe 满速 100（不是 0）: $devtail" ;;
+    *'._FSL 1 0')   ng "$name: 假设备收到了 _FSL 1 0 —— 风扇停转，本守卫就是要防这个" ;;
+    *)               ng "$name: 假设备最后收到的不是满速 100: ${devtail:-空}" ;;
+  esac
+  if [ "$nb" -ge 1 ]; then                                          # b) 点名判据
+    ok "$name: 命中的是本守卫那条判据: $(grep "$want" "$d/pfand.log" | tail -1 | cut -c21-96)"
+  else
+    ng "$name: 没有命中下界判据「$want」—— 可能只是被关系判据顺手抓了，那样测的不是本守卫"
+  fi
+  if [ "$nl" -eq 0 ]; then                                           # c) 没进主循环
+    ok "$name: 没有进主循环（无参数来源横幅）"
+  else
+    ng "$name: 进了主循环: $(grep '参数来源' "$d/pfand.log" | tail -1 | cut -c21-96)"
+  fi
+  if [ "$nr" -eq 0 ]; then                                           # c) 没回读
+    ok "$name: 假设备一次都没被回读 _FST（确实在 getL 之前就退出了）"
+  else
+    ng "$name: 假设备被回读了 _FST $nr 次 —— 自检之后并没有立刻退出"
+  fi
+  if [ "$rc" = 124 ]; then                                           # d) 退出码
+    ng "$name: rc=124 —— 守护活到了超时，说明自检之后它还在跑"
+  elif [ "$rc" = 缺 ] || [ "$rc" = 0 ]; then
+    ng "$name: rc=$rc —— 必须非零退出，Restart=on-failure 才会在 15s 后重试"
+  else
+    ok "$name: 自检后立刻非零退出 rc=$rc"
+  fi
+}
+# E=0 / CAP=0：这两种是专家审计点名的停转形态。0 写进设备就是 _FSL 1 0。
+# CAP=0 更阴：apply() 把目标钳到 0 之后 d=|0-written|=0 < DEAD，于是【不写不记日志】，
+# 风扇停在 ensure_s0i3 握手留下的 0 上，连日志都没有。
+_chk_bnd_reject e0    0   70 's/^E=100$/E=0/'   '档位下界非法'
+_chk_bnd_reject cap0  100 0   's/^CAP=70$/CAP=0/' '档位下界非法'
+# L0=24 / L5=24：低于固件 _FPS 表最低档 25。这两例关系判据全程沉默（不自洽=0），
+# 也就是说【只有】下界检查会碰它们 —— 它们单独把 core/pfand:213 那行与 L1..L5 循环
+# （core/pfand:217-223）各自钉住。
+_chk_bnd_reject l0_24 100 70 's/^L0=25$/L0=24/' '档位下界非法'
+_chk_bnd_reject l5_24 100 70 's/^L5=70$/L5=24/' '低于 _FPS 最低档 25'
+# iso：CAP=20 且 L5=20 —— 关系判据 E<=CAP / L5>CAP 都不成立，全程沉默，
+# 只有两条下界检查会响。它是"下界检查自己就能独立起作用"的正面证据。
+_chk_bnd_reject iso   100 20 's/^CAP=70$/CAP=20/; s/^L5=70$/L5=20/' '档位下界非法'
+_isir=$(_ecfg_cnt "$T/t12.iso" '不自洽'); _isir=${_isir:-0}
+if [ "$_isir" -eq 0 ]; then
+  ok "iso: 关系判据确实全程沉默（不自洽=0）—— 这次拒绝只可能是下界检查干的"
+else
+  ng "iso: 关系判据也响了（不自洽=$_isir）—— 这例证明不了下界检查能独立起作用"
+fi
+
+echo "-- 反向对照：出厂配置必须照常接管（L0=25 恰好就压在下界上）"
+# 少了这一侧，上面每一条即使恒真也看不出来：一个"一律拒绝"的守卫能全绿。
+# 它同时是【边界】对照 —— 25 是 _FPS 表的最低档、合法值，所以把
+# `-lt 25` 改成 `-le 25`（边界不再触发）时，这里会立刻红。
+_d12="$T/t12.coherent"
+_ecfg_run "$_d12" 100 70 15 ''
+if [ "$(_ecfg_cnt "$_d12" '参数来源')" -eq 0 ]; then
+  ng "反向对照：出厂配置 E=100 CAP=70 L0=25 被误拒 —— 守卫过宽，或下界被写成了 -le 25"
+else
+  # 15s：_ecfg_fsl 读的是假设备的回读流水，而 setL "$E" 写在【第一次】getL 之后，
+  # 要等第二个 IV(10s) 回合的 getL 才会被采进流水 —— 10s 超时这里会是空的（同 T13c）。
+  ok "反向对照：出厂配置（L0=25 恰在下界上）照常接管: $(_ecfg_fsl "$_d12")"
+fi
+if [ "$(_ecfg_bnd "$_d12")" -ne 0 ]; then
+  ng "反向对照：出厂配置被判了档位下界非法 —— L0=25 是合法值: $(grep -E '档位下界非法|低于' "$_d12/pfand.log" | tail -1 | cut -c21-96)"
+else
+  ok "反向对照：出厂配置没有被判下界非法（L0=25 = _FPS 最低档，合法）"
+fi
+
+echo "== T13: 配置自检必须拒绝 E <= CAP（否则最热温度写一个比日常上限更弱的档，日志还写「立即满速」）=="
+# 复核自 spec F4（实测）：E=50 CAP=70 被自检放行，启动对齐在 85°C 直接写 _FSL 1 50
+# 并记「立即满速 50%」—— 应急比日常上限 CAP=70 还弱，日志却声称满速。
+# 既是欠冷却（最热时风扇比平时上限还慢）也是谎报（日志说"立即满速"）。
+# 面板那份 validate_params 已就同一条判据同步（server/pfan_core.py，E <= CAP）；
+# 守护这份自检是它的对偶 —— 任一边放过 E<=CAP，这个洞就会重新打开。
+#
+# 判据全部落在【设备侧】与【日志】上，一行源码都不看：
+#   a) 日志记「不自洽」，且【没有】参数来源横幅（横幅只在自检通过、进主循环之后才打）
+#   b) 假设备收到的最后一次请求是 _FSL 1 100（fail-safe 满速）
+#   c) 假设备的回读流水里一条 _FST 都没有（进了主循环就必然有一次 getL 回读）
+# T12 原先也是 grep 源码的守卫（判据被整段删掉照样绿），现已换成同一套假设备上的
+# 行为测试；两边共用下面这套 _ecfg_run —— 它原先定义在 T12 之后，为让 T12 能用已上移。
+# 两边必须继续共用：各写一套假设备，等于两份会一起腐烂的断言。
+#
+# 产物一律留在用例目录里由断言现读，不用 | 分隔的结果串往回传 —— 结果串里的 | 一旦
+# 进到 pattern 里就会被当成 case 的分支分隔符，把判据变成永远不触发的死代码。
 
 chk_ecfg_reject(){ # chk_ecfg_reject <名字> <E> <CAP>
   local name="$1" e="$2" cap="$3" d="$T/t13.$1" devtail n_bad n_loop n_fst
