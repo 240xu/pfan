@@ -468,7 +468,7 @@ grep -q 'os.replace\|mv "\$T" "\$PFAN_CONF"' core/pfan \
 echo
 echo "== T22: set -e 脚本里调用可能非0 的命令必须显式兜住 =="
 # 第三次同类事故（见 ledger）：hooks/pre-push 顶部有 set -e，我加的
-# `bash scripts/sanitize.sh > /dev/null 2>&1` 在发现 19 处命中时返回非0 —— set -e 于是
+# `bash scripts/sanitize.sh > /dev/null 2>&1` 在发现命中时返回非0 —— set -e 于是
 # 静默终止整个 hook，git 只报 "failed to push some refs"，看不到任何原因。
 # 判据：pre-push / ci.sh / deploy.sh 里，形如 `某命令` 且【没有】 || true / || rc=1 /
 # || { ... } 收尾的行，且该命令可能非0。
@@ -559,6 +559,145 @@ grep -qE 'EMERG_V=0;' scripts/smoke.sh \
 grep -qE 'EMERG_V=80' scripts/smoke.sh \
   && ng "smoke.sh 里还有静默的 EMERG_V=80 兜底" \
   || ok "没有静默的 EMERG_V=80 兜底"
+
+echo
+echo "== T24: 脱敏门的宣称必须与实现逐条对应，且新增的两条规则必须真的能拦住东西 =="
+# 这条守卫针对的正是它自己这个失败类：8013ff0 的 --list 印了 5 类规则，脚本只编译了
+# 3 条，缺的两条（带用户名的远端目标、私网网段）在 --list 上写着、在实现里没有，而 pfan
+# 就在本仓库可执行文件里躺着。宣称与实现各说各话，跟这个门要拦的东西是同一种病。
+#
+# ⚠ 探针必须放在【仓库内且在 git index 里】：sanitize.sh 扫的是 `git ls-files`。
+#   brief 原本用 `mktemp -d` 放到仓库外，那样的文件门永远看不见，断言只会恒红。
+#   用 `git add -N`（intent-to-add）登记，trap 里连文件带 index 一起清掉。
+_probe="scratch-t24-probe.md"
+_san_root=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$_san_root" ]; then
+  ng "不在 git 仓库里 —— 无法验证脱敏门"
+else
+  _t24_cleanup() {
+    cd "$_san_root" 2>/dev/null || return 0
+    rm -f "$_probe"
+    git rm --cached --force -q "$_probe" 2>/dev/null
+    git reset -q -- "$_probe" 2>/dev/null
+    return 0
+  }
+  trap _t24_cleanup EXIT INT TERM
+
+  # ---- 24a: --list 逐条印出【实际编译】的正则 ----
+  # 从规则块里逐行取出正则，逐条要求它原样出现在 --list 输出里。散文里也可能写着
+  # 长得像正则的东西（8013ff0 的 "~/.ssh/id_[a-z0-9]*" 就是），所以只验"出现"不够，
+  # 还要验条数相等：--list 印出来的规则条数必须等于规则块的条数，一个不多一个不少。
+  _blk_start=$(grep -n '^RULES=\$(cat' scripts/sanitize.sh | head -1 | cut -d: -f1)
+  if [ -z "$_blk_start" ]; then
+    ng "scripts/sanitize.sh 里找不到规则块起点（RULES=\$(cat ...）—— T24 自己先失效了"
+  else
+    # ⚠ 规则块的结束标记是【单独一行的 RULES】（heredoc 定界符），不是行首的 `)` ——
+    #   `)` 收的是整个 $(...) 命令替换，在定界符之后三行。第一版按 `^\)$/` 停，
+    #   多吞了两行注释和定界符本身，5 条数成 9 条，断言跟着一起错。
+    _blk=$(awk -v s="$_blk_start" 'NR>s && /^RULES$/ {exit} NR>s {print}' scripts/sanitize.sh)
+    _n_real=$(printf '%s\n' "$_blk" | grep -c "$(printf '\t')")
+    _list=$(bash scripts/sanitize.sh --list 2>/dev/null)
+    _n_list=$(printf '%s\n' "$_list" | grep -cE '^  \[[0-9]+\] ')
+    if [ "$_n_list" = "$_n_real" ]; then
+      ok "--list 印出 $_n_list 条规则，与编译进 RULES 的 $_n_real 条条数相等"
+    else
+      ng "--list 印了 $_n_list 条而编译了 $_n_real 条 —— 宣称与实现对不上"
+    fi
+    _miss=""
+    while IFS="$(printf '\t')" read -r _re _why; do
+      # 无 TAB 的行不是规则（块里还有非规则行），别拿它们去 --list 里找
+      [ -n "$_re" ] && [ -n "$_why" ] || continue
+      case "$_list" in
+        *"$_re"*) ;;
+        *) _miss="$_miss|$_re" ;;
+      esac
+    done <<< "$_blk"
+    if [ -z "$_miss" ]; then
+      ok "--list 里逐条都能找到编译进来的正则（无只宣不编的类别）"
+    else
+      ng "这些正则编译进来了但 --list 没印:${_miss}"
+    fi
+  fi
+
+  # ---- 24b/24c: 每条新规则都必须真能拦住东西 ----
+  # ⚠ 探针字符串【故意拆成碎片再拼】：门扫的是整个仓库，本测试文件也在里面。
+  #   把「用户名@私网地址」那样一整串完整写出来的话，门会把本文件自己判成命中
+  #   （2026-10-11 实测：光这一个文件就贡献了 10 处）—— 测试还没写完，
+  #   自己的门先把自己判红了。拼出来的那一行仍然是货真价实的实例，拦的是它。
+  _f_at='@'
+  _f_user='dep''loy'
+  _f_privip='10.44.''7.21'
+  _f_privip2='192.168.''7.42'
+
+  printf 'probe: ssh %s%s%s true\n' "$_f_user" "$_f_at" "$_f_privip" > "$_probe"
+  git add -N "$_probe" 2>/dev/null
+  if ! git ls-files | grep -qx "$_probe"; then
+    ng "探针没进 git ls-files —— T24 的探针机制本身坏了，后两条断言无效"
+  else
+    # ⚠ 规则名必须与探针命中落在【同一行】。早先是分两次 grep 整个输出，那是两件
+    #   互不相干的事：把「带用户名的远端目标」那条规则改废之后（M2 变异），探针仍被私网网段命中，
+    #   而"带用户名的远端目标"这个串仍在输出里 —— 因为门会把命中行的【原文】也打出来，
+    #   而那行正是本测试文件自己的 ok 消息。两个 grep 都过，规则已死，断言却报 [ok]。
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -F "$_probe:1" | grep -qF '带用户名的远端目标'; then
+      ok "规则【带用户名的远端目标】能拦住带用户名的远端目标探针"
+    else
+      ng "规则【带用户名的远端目标】拦不住 <user>@<host> —— --list 宣称拦它，实现里没有"
+    fi
+
+    printf 'probe: target host is %s\n' "$_f_privip2" > "$_probe"
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -F "$_probe:1" | grep -qF '私网地址'; then
+      ok "规则【私网地址】能拦住私网地址探针"
+    else
+      ng "规则【私网地址】拦不住私网地址 —— --list 宣称拦它，实现里没有"
+    fi
+
+    # 反向：该不拦的不能拦。公网 IP、npm 版本号、@占位符、三段式、172.32 都在
+    # 私网之外；这条拦不住的话，一条什么都拦的规则也能让上面两条"通过"。
+    printf 'dns 8.8.8.8\npkg uplot@1.6.32\nzone @TEMP@\nrange 172.32.0.1\nshort 192.168.1\n' > "$_probe"
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -qF "$_probe:"; then
+      ng "新规则误报：公网 IP / npm 版本号 / 占位符 / 三段式 / 172.32 不该被拦"
+    else
+      ok "新规则不误报：公网 IP / npm 版本号 / 占位符 / 三段式 / 172.32 均未被拦"
+    fi
+
+    # ---- 24d: 这个脚本自己必须过得去自己的门 ----
+    # 规则文本与头部注释里举的例子必然命中自己，为此排除了「本文件的规则块 + 注释行」。
+    # 一旦有人把那个排除删掉，这个脚本就再也过不了自己 —— 和整个门对 fork 不可满足
+    # 是同一类病（宣称能过，实际过不了），所以在这里钉死。
+    # 反向也验一次：排除【只】对 sanitize.sh 生效，别处的带用户名远端目标该拦还得拦。
+    #
+    # ⚠ ⚠ 下面两断言都先把输出【收进变量】再 grep，【不】写 `sanitize.sh | grep -q`。
+    #   本文件开头有 `set -uo pipefail`，而 grep -q 命中即退出并关掉管道 →
+    #   sanitize.sh 收 SIGPIPE（141）→ pipefail 取最右边的非零 → `&&` 分支永远不走，
+    #   断言把"命中了"报成"没命中"。第一版就是这么写的，而且只在绿的那条路径上
+    #   看起来正常（grep 没命中时会读完整个输入，不会 SIGPIPE）—— fail-open 到看不出来。
+    _self=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_self" | grep -q '^  scripts/sanitize\.sh:'; then
+      ng "sanitize.sh 命中了自己（规则块/注释的自我排除被删或失效）—— 它过不了自己的门"
+    else
+      ok "sanitize.sh 过得去自己的门（规则块与注释的自我排除生效）"
+    fi
+    printf 'probe: ssh %s%s"$PFAN_HOST" true\n' "$_f_user" "$_f_at" > "$_probe"
+    _self=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_self" | grep -qF "$_probe:1"; then
+      ok "自我排除没有溢出到其它文件（探针仍被拦）"
+    else
+      ng "自我排除溢出：探针里的带用户名远端目标没被拦住"
+    fi
+  fi
+  _t24_cleanup
+  trap - EXIT INT TERM
+  # 只查探针本身有没有留痕，【不】查整个工作区是否干净 —— 这个测试本来就是在带
+  # 未提交改动的工作区里跑的，拿 git status 当判据会把开发者自己的改动算成失败。
+  if [ -e "$_probe" ] || git ls-files | grep -qx "$_probe"; then
+    ng "T24 跑完探针还留在仓库里（文件或 git index 里都有残留）"
+  else
+    ok "T24 探针已清除：文件与 git index 都无残留"
+  fi
+fi
 echo
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"

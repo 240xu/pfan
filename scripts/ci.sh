@@ -98,7 +98,8 @@ bash scripts/sanitize.sh > "$HOME/.cache/pfan-sanitize.txt" 2>&1
 _san_rc=$?
 _n=$(grep -cE '^  [a-zA-Z][^ ]*:[0-9]+' "$HOME/.cache/pfan-sanitize.txt" 2>/dev/null || echo 0)
 echo "  命中 $_n 处（详见 bash scripts/sanitize.sh）"
-# ⚠ 这里【不】让 ci 失败：这 19 处是本仓库作者自己的网络信息，它们【本来就该在】——
+# ⚠ 这里【不】让 ci 失败：命中的是本仓库作者自己的网络信息，它们【本来就该在】——
+#   （条数每加一条规则就变，所以下面那句"命中 $_n 处"是从脚本输出数的，不写死。）
 #   这是私有仓库，代码里的 PFAN_HOST 默认值删了就坏。真正需要阻断的是「远端变成
 #   公开仓库的那一刻」，而那个时刻只能由人判断，所以门放在 hooks/pre-push：
 #     PFAN_PUBLISH=1 git push   → 脱敏未通过则拒绝推送

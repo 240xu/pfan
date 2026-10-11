@@ -8,15 +8,19 @@ echo "== pre-push: 脱敏门（公开前的硬阻断）=="
 # 为什么放在 ci 之前：ci 证明代码是对的，sanitize 证明它【可以公开】。后者一旦
 # 漏掉就不可逆 —— 内网地址、公网入口主机名、私钥路径一旦推上去就等于公开。
 # 豁免走 scripts/sanitize.allow（gitignored），所以本机可以用它放行本机专属的行。
-# ⚠ 平时 push【不】被脱敏拦住：这 19 处是作者自己的网络信息，在私有仓库里它们
-#   本来就该在（代码里的 PFAN_HOST 默认值删了就坏）。一旦漏推出去就不可逆，所以
+# ⚠ 平时 push【不】被脱敏拦住：命中的都是作者自己的网络信息，在私有仓库里它们
+#   本来就该在（代码里的 PFAN_HOST 默认值删了就坏）。条数每次规则一改就变，所以
+#   这里【不】写死 —— 要看多少条跑 `bash scripts/sanitize.sh`。一旦漏推出去就不可逆，所以
 #   阻断点放在「人明确表示要发布」的那一刻：
 #       PFAN_PUBLISH=1 git push     ← 远端将公开时用这个
 #   平时用 PFAN_SKIP_SANITIZE=1 显式跳过（脚本会把它记成"你决定了"，不是静默放过）。
-# ⚠ 必须 `|| true` 兜住：pre-push 顶部有 set -e，而 sanitize.sh 发现命中就返回非0 ——
-#   不兜住的话，整个 hook 会在这一行静默死掉，git 只报 "failed to push some refs"，
-#   看不到任何原因（2026-10-10 实测踩到）。
-bash scripts/sanitize.sh > /dev/null 2>&1 || true
+# ⚠ 必须把非零退出码接住：pre-push 顶部有 set -e，而 sanitize.sh 发现命中就返回非0 ——
+#   不接住的话，整个 hook 会在这一行静默死掉，git 只报 "failed to push some refs"，
+#   看不到任何原因（2026-10-10 实测踩到）。接法就是下面的 `|| _san_rc=$?`：
+#   命令的退出码被赋进变量，set -e 便不触发。
+#   （这里原先连着跑了两次 sanitize.sh：头一遍 `|| true` 把结果整个丢掉，第二遍才取码。
+#    895d9ad 的遗留。同一份检查跑两遍只是白费一次扫描；真正的问题不是"跑两遍"，
+#    而是第一遍的结果从来没人看 —— 删掉的是它，留下的是接码的那一遍。）
 _san_rc=0
 bash scripts/sanitize.sh > /dev/null 2>&1 || _san_rc=$?
 if [ "${PFAN_PUBLISH:-0}" = 1 ]; then
