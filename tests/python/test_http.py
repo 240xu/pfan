@@ -838,35 +838,87 @@ def test_daemon_ready_needs_the_unit_and_the_device_to_agree():
         pfanel.get_ec76 = _real_ec
 
 
-def test_switching_to_a_firmware_curve_is_not_treated_as_failure():
-    """RF4：切到 quiet/cool 时守护【应该】正常退出 —— 新判据不能把它误判成失败而回滚。
+def test_firmware_curves_never_wait_for_the_daemon():
+    """RF4：守护【故意】停着的曲线一条都不许等守护就绪。
 
-    core/pfand 在曲线非 s0i3 时 exit 0，这是设计。若 _daemon_ready 被套用到
-    quiet/cool 分支，这两条曲线会立刻被判成"守护没起来"然后被回滚成别的曲线 ——
-    用户选了固件接管，却拿到另一种曲线；而且每次切换都要白等满 timeout_s。
+    core/pfand 在曲线非 s0i3 时 exit 0，那是设计不是故障。对应四条曲线：
+    auto（交回固件）、quiet / cool（固件自己的曲线）、free（档位由面板直接控）。
+    判据只属于 s0i3 分支 —— 只有那里"守护不来"等于把风扇留在 _FSL 0 上（停转）；
+    其余曲线上守护不来正是【预期】，套上判据就会把用户选的曲线回滚成 cool。
 
-    用【行为】而不是源码形状来断言（把 _daemon_ready 打桩成一被调用就 raise）：
-    源码字符串检查会被一次自动折行静默废掉 —— 那正是本文件
-    test_state_seam_defaults_equal_production 注释里记过的 2026-10-08 实例，
-    "格式化器悄悄废掉安全守卫，比没有守卫更危险"。
+    两条断言，缺一不可：
+      ① 返回值与持久化都仍是请求的曲线 —— 判据若带完整回滚，这里会变成 cool；
+      ② _daemon_ready 一次都没被调用 —— 2026-10-11 实测：只往 free 分支注入一个
+         【裸调用】（不改返回流程）时，持久化的曲线根本没变，只有"调用发生过"是
+         唯一可观测的差异。只断言 ① 的版本对此全绿放行，那正是本条最初漏掉 free
+         的原因（上一版只覆盖了 quiet/cool）。
+
+    全程【行为】断言，不看源码形状：字符串包含会被一次自动折行静默废掉 ——
+    那正是本文件 test_state_seam_defaults_equal_production 注释里记过的
+    2026-10-08 实例，"格式化器悄悄废掉安全守卫，比没有守卫更危险"。
     """
-
-    def _boom(*a, **k):
-        raise AssertionError(
-            "quiet/cool 分支调用了 _daemon_ready —— 固件曲线本就没有守护可等"
-        )
-
     import subprocess as _sp
 
     _real_run = _sp.run
     _real_ready = getattr(pfanel, "_daemon_ready", None)
+    _real_open, _real_time = builtins.open, pfanel.time
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    calls = []
+
+    def _never_ready(*a, **k):
+        calls.append(1)
+        return False
+
+    class _NoSleep:
+        """只有 sleep 变空操作，其余属性全部转给真 time 模块。
+
+        auto 分支里的 time.sleep(1.6) 是等固件接管曲线；假设备后面没有固件，
+        这一等不可能改变"哪条曲线被写进 curve.state"。连同 acpi() 每次调用的
+        轮询 sleep 一起桩掉，本条实测 5.14s -> 1.80s（tests/python 已 ~74s）。
+        _result_state() 判"有没有新结果"用的是假 dmesg 自己的递增计数，不是墙钟，
+        所以桩掉 sleep 不会让 acpi() 读不到 RESULT。
+        """
+
+        def sleep(self, _s):
+            return None
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
     _sp.run = _systemctl_stub("inactive", _real_run)
-    pfanel._daemon_ready = _boom
+    pfanel._daemon_ready = _never_ready
+    pfanel.time = _NoSleep()
+    pfanel.open = lambda q, *a, **k: (
+        _real_open(log, "a")
+        if str(q) == "/var/log/pfanel.log"
+        else _real_open(q, *a, **k)
+    )
     try:
-        assert pfanel.set_curve("quiet") == "quiet", "quiet 分支被新判据带跑了"
-        assert pfanel.set_curve("cool") == "cool", "cool 分支被新判据带跑了"
+        for want in ("auto", "quiet", "cool", "free"):
+            # 起点写一个 CURVES 里根本不存在的曲线名：断言"写进去的正是请求的曲线"
+            # 才不会因为起点恰好相等而空过 —— auto 那条尤其要防这个。
+            with open(curve_file, "w", encoding="utf-8") as fh:
+                json.dump({"curve": "nonexistent", "level": 0}, fh)
+            got = pfanel.set_curve(want)
+            assert got == want, (
+                "请求 %r 却拿到 %r —— 判据被套到守护本来就该停着的曲线上并回滚了"
+                % (want, got)
+            )
+            st = pfanel.get_state()
+            assert st["curve"] == want, (
+                "请求 %r 却把 %r 持久化了 —— 固件接管被换成了另一种曲线" % (want, st["curve"])
+            )
+            assert not calls, (
+                "%s 分支调用了 _daemon_ready —— 这条曲线上守护本来就该是停的，"
+                "没有【就绪】可等（core/pfand 在非 s0i3 曲线下 exit 0 是设计）"
+                % (want,)
+            )
     finally:
         _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel.time = _real_time
         if _real_ready is None:
             pfanel.__dict__.pop("_daemon_ready", None)
         else:
