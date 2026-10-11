@@ -68,7 +68,7 @@ def test_presets_never_relax_the_safety_envelope():
         for k in ("L0","L1","L2","L3","L4","L5"):
             assert 0 < p[k] <= p["CAP"], f"{n}: {k}={p[k]} 越界（0=停转，上限 CAP={p['CAP']}）"
         assert p["EMERG_REL"] < p["EMERG"], f"{n}: 滞回不自洽"
-        assert p["E"] >= p["CAP"], f"{n}: 应急档低于 CAP"
+        assert p["E"] > p["CAP"], f"{n}: 应急档未高于 CAP（相等也不行：应急=日常上限就不是应急）"
         assert p["DWELL"] >= p["IV"], f"{n}: DWELL 小于 IV 会震荡"
 
 def test_emergency_still_reachable_under_load():

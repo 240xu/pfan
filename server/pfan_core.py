@@ -52,8 +52,13 @@ def validate_params(d):
             errs.append("档位 %d 超出 [0,%d]" % (x, d["CAP"]))
             break
 
-    if d["E"] < d["CAP"]:
-        errs.append("应急档 E(%d) 不应小于 CAP(%d)" % (d["E"], d["CAP"]))
+    # 应急档 E 必须【高于】日常硬上限 CAP，相等也不行 —— 「应急」与日常上限无差别
+    # 等于没有应急。这条必须与 core/pfand 的自检逐字一致：两边不一致时最糟的形态
+    # 不是面板报错，而是面板接受并持久化、守护随后拒绝启动（core/pfand 记不自洽、
+    # 写 _FSL 1 100 并退出）—— 操作员看到面板说 OK，风扇却满速且没有控制环。
+    if d["E"] <= d["CAP"]:
+        errs.append("应急档 E(%d) 必须大于 CAP(%d)（相等也不行：应急等于日常上限就不是应急）"
+                    % (d["E"], d["CAP"]))
     if d["IV"] < 2:
         errs.append("IV 采样间隔至少 2s")
     if d["DWELL"] < d["IV"]:

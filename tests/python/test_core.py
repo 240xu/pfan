@@ -47,6 +47,26 @@ def test_emergency_level_must_not_be_below_cap():
     assert errs and any("E(" in e for e in errs)
 
 
+def test_emergency_level_equal_to_cap_is_rejected():
+    """E == CAP 也必须被拒 —— 「应急」等于日常上限就不是应急。
+
+    这条与 core/pfand 的自检是同一条判据。两边一旦不一致，最糟的形态不是面板报错，
+    而是面板接受并持久化、守护随后拒绝启动（记不自洽 -> 写 _FSL 1 100 -> exit）：
+    操作员看到面板说 OK，风扇却满速且没有控制环。
+    """
+    errs = validate_params(dict(GOOD, E=70, CAP=70))
+    assert errs, "E == CAP 居然通过了面板校验 —— 面板会存下一份守护拒绝启动的曲线"
+    assert any("E(" in e for e in errs), errs
+
+
+def test_emergency_level_above_cap_still_passes():
+    """反向对照：E > CAP（出厂 E=100 CAP=70）必须照常通过。
+
+    少了这一侧，上面两条即使恒真也看不出来 —— 一律拒绝同样能让它们变绿。
+    """
+    assert validate_params(dict(GOOD, E=100, CAP=70)) == []
+
+
 def test_out_of_range_trim_gain_rejected():
     assert validate_params(dict(GOOD, TRIM=99))
     assert validate_params(dict(GOOD, GAIN=99))
