@@ -224,7 +224,17 @@ if [ "$_cfg_bad" = "0" ]; then
 fi
 if [ "$_cfg_bad" = "1" ]; then
     flock -x 9; echo "$F._FSL 1 100" > "$DEV" 2>/dev/null; flock -u 9
-    exit 0
+    # 必须非零退出，与上面平台配置不可用的 fail-safe 同一条规则（见 :123-125）：
+    # systemd 写的是 Restart=on-failure / RestartSec=15（systemd/pfand.service:11-12），
+    # exit 0 等于让守护就此死掉 —— 实测 E=70 CAP=70 时它写 _FSL 1 100 然后 exit 0，
+    # 风扇停在 100% 且 15s 后不再重试，只能等人来改配置。
+    #
+    # 为什么这条收紧是【严格更好】而不是把"降级运行"变成"死循环"：
+    # 本分支之前 E == CAP 是被放行的（守护降级运行），所以没有人在意退出码；
+    # 现在 E <= CAP 被拒，一份原本能跑的配置就此变成 dead-loop 形态。
+    # 而重试的代价是零：每次启动都会重写同一个 fail-safe 档位（上面那行 echo），
+    # 重试只是把同一次写入每 15s 重复一次，配置一改好就自己接管。
+    exit 1
 fi
 
 ensure_s0i3(){

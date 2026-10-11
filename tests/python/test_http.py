@@ -466,8 +466,13 @@ def test_free_curve_must_not_break_persisted_state_restore():
     )
 
 
-# ---------------- 专家审计 C2 续：level=0 / level 缺失必须回落，而不是留停转 ----------------
-# 上一条只覆盖 level=40（有意的非零档位）。缺省值那一支 —— level 压根是 0，
+# ---------------- 专家审计 C2 续：存档 level 不可用（0 / null / 非整数 / bool / 非有限）必须回落，而不是留停转 ----------------
+# 组名必须说清这一组实际覆盖什么：本组五个成员是"值不可用"的五种形态，
+# 不是"level=0 / level 缺失"两种 —— 「缺失」得到的是 0（get_state 的 d.get 默认值），
+# 与第一条同字节；而 null 那条是后来补的，名字也早就从 missing 改成了 null_level。
+# 写成两种覆盖的是组名，与成员对不上 —— 正是这个仓库在删的毛病。
+# 上一条（test_free_curve_must_not_break_persisted_state_restore）只覆盖 level=40
+# （有意的非零档位）；这一组补的是"值根本不可用"的那一支。缺省值那一支 —— level 压根是 0，
 # 也就是从没按过档位按钮的【默认状态】—— 旧实现是掉进"无可恢复"的。
 
 def test_persisted_state_with_zero_level_falls_back_not_stops():
@@ -760,11 +765,17 @@ def test_set_curve_rolls_back_when_daemon_does_not_come_up():
     dev = os.environ["PFAN_DEV"]
     curve_file = os.environ["PFAN_CURVE_FILE"]
     log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    # 设备侧请求流水：假 dmesg 逐条 append，是唯一留得住【每一次】写入的地方。
+    # 本用例要用它，是因为回滚现在会在 EC 写之后再兜底写一次 _FSL
+    # （交回后置条件），而 acpi() 以 "w" 打开设备，设备文件里只剩最后一次写入 ——
+    # 于是"最后一条是 cool 的 EC 写"这条断言在新行为下必然失败，尽管那次写确实发生了。
+    dmesg_log = os.environ["PFAN_DMESG_LOG"]
     # 起点显式写成 auto：断言"没有持久化 s0i3"才不会被上一条用例留下的值顺带满足
     with open(curve_file, "w", encoding="utf-8") as fh:
         json.dump({"curve": "auto", "level": 0}, fh)
     open(dev, "w").close()
     open(log, "w").close()
+    open(dmesg_log, "w").close()
     import builtins as _b
     import subprocess as _sp
 
@@ -801,10 +812,366 @@ def test_set_curve_rolls_back_when_daemon_does_not_come_up():
     assert "回滚" in logtext, (
         "回滚必须留日志，事后才分得清是守护没起来还是根本没检查：%r" % (logtext,)
     )
-    writes = _real_open(dev, encoding="utf-8").read().splitlines()
-    assert any("0x79 0x00" in l for l in writes), (
+    writes = _real_open(dmesg_log, encoding="utf-8").read()
+    assert "0x79 0x00" in writes, (
         "没有写 cool 的 EC 曲线值（0x79=0x00）—— 没回滚到 _FSL 0 也不会停转的曲线：%r"
         % (writes,)
+    )
+
+
+# ---------------- 终审 I1：回滚目标自己也必须验证交回 ----------------
+# set_curve("cool") 是 s0i3 拉起守护失败后的自动安全网。旧实现写完 _FSL 1 0 +
+# EC88 cool 就返回，从不验证 EC 有没有真的接管；而它的兄弟分支 auto 是验证的
+# （等稳 → get_ec76() → 为 0 就兜底）。固件曲线下 _FSL 0 是【相信】安全的，
+# 但这条分支一旦成为自动安全网，"相信"就成了承重结构：
+# EC 写不进去（楔住的 EC —— 与守护起不来同一故障类）时，EC 仍停在 s0i3、
+# _FSL 停在 0、风扇停转，而 cool 不在 GUARDED 里，没有任何东西在看它。
+
+
+def _last_fsl(dev):
+    """假设备上【最后一条】_FSL 写入的档位数字；最后一次写入不是 _FSL 时返回 None。
+
+    acpi() 每次都以 "w" 打开设备，所以文件里只留最后一次写入的命令（不是流水）。
+    读法按整份内容匹配而不是按行：命令流不带换行，按行取会拿到别的命令。
+    返回 None 有明确含义 —— 最后落下去的不是一次 _FSL 写入，即没有把档位压下来。
+    """
+    import re as _re
+
+    with open(dev, encoding="utf-8") as fh:
+        found = _re.findall(r"_FSL 1 (\d+)", fh.read())
+    return int(found[-1]) if found else None
+
+
+def test_rollback_to_cool_verifies_the_handover_before_returning():
+    """EC 写不进去时，回滚必须自己发现并兜底，不能"回滚成功"着把风扇留在 _FSL 0。
+
+    两个方向都要跑，缺一不可：
+      ① EC 写被丢弃（楔住的 EC）+ 读回 0 -> 最后一次写入必须是非零下限；
+      ② EC 写成功、固件真的接管（读回 44）-> 最后一次写入不得是 _FSL。
+    只跑 ① 的话，一条"无条件写兜底档位"的实现也全绿 —— 它会把每次正常切
+    cool/quiet 都降成手动档位，是另一种事故。只跑 ② 则本缺陷完全看不见。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import subprocess as _sp
+
+    _real_run, _real_open, _real_acpi = _sp.run, builtins.open, pfanel.acpi
+    _real_ready = getattr(pfanel, "_daemon_ready", None)
+    _real_ec = pfanel.get_ec76
+
+    def _rollback_with(ec_reads, drop_curve_write):
+        """守护起不来 -> 回滚 cool。ec_reads 是 get_ec76 的返回值序列（用尽后重复末条）。"""
+        with open(curve_file, "w", encoding="utf-8") as fh:
+            json.dump({"curve": "auto", "level": 0}, fh)
+        open(dev, "w").close()
+        open(log, "w").close()
+        seq = list(ec_reads)
+        dropped = []
+
+        def _acpi(path, args=""):
+            # 楔住的 EC：0x79 曲线写既不落到设备也不回 RESULT。
+            # 注意要拦的是"写"，不是"读"—— get_ec76 读的是 0x76，不含 0x79。
+            if drop_curve_write and str(path) == pfanel.EC88 and "0x79" in str(args):
+                dropped.append(args)
+                return None
+            return _real_acpi(path, args)
+
+        def _ec():
+            return seq.pop(0) if len(seq) > 1 else seq[0]
+
+        _sp.run = _systemctl_stub("inactive", _real_run)
+        pfanel.acpi = _acpi
+        pfanel.get_ec76 = _ec
+        pfanel.open = lambda p, *a, **k: (
+            _real_open(log, "a")
+            if str(p) == "/var/log/pfanel.log"
+            else _real_open(p, *a, **k)
+        )
+        pfanel._daemon_ready = lambda *a, **k: False
+        try:
+            got = pfanel.set_curve("s0i3")
+        finally:
+            _sp.run = _real_run
+            pfanel.open = _real_open
+            pfanel.acpi = _real_acpi
+            pfanel.get_ec76 = _real_ec
+            if _real_ready is None:
+                pfanel.__dict__.pop("_daemon_ready", None)
+            else:
+                pfanel._daemon_ready = _real_ready
+        return got, dropped, _real_open(log, encoding="utf-8").read()
+
+    got, dropped, logtext = _rollback_with([0], True)
+    assert dropped, "0x79 曲线写一个都没被丢弃 —— 本用例的故障没有真的注入"
+    assert got == "cool", "守护没起来时应回滚到 cool，实际返回 %r" % (got,)
+    last = _last_fsl(dev)
+    assert last is not None and last >= pfanel.MIN_SAFE_LEVEL, (
+        "EC 写被丢弃、读回 0 时最后一次 _FSL 写入是 %r —— 回滚停在 _FSL 0 上，"
+        "风扇停转，而 cool 不在 GUARDED 里没有任何东西在看它（0 在 ACPI 里就是停转）"
+        % (last,)
+    )
+    assert "未交回成功" in logtext, (
+        "兜底写必须留日志，事后才分得清是回滚没生效还是根本没检查：%r" % (logtext,)
+    )
+
+    _got2, dropped2, _log2 = _rollback_with([44], False)
+    assert not dropped2, "反向对照里曲线写不该被丢弃"
+    assert _got2 == "cool", "反向对照里守护同样没起来，应同样回滚到 cool：%r" % (_got2,)
+    last2 = _last_fsl(dev)
+    assert last2 is None, (
+        "固件已经接管（EC=44）时最后写下去的却是 _FSL 1 %r —— 无条件兜底会把每次"
+        "正常切 cool/quiet 都降成手动档位，那是另一种事故" % (last2,)
+    )
+
+
+def test_rollback_that_raises_still_leaves_a_non_stopping_level_and_a_log():
+    """回滚自己抛异常时：异常不许逃出 set_curve，风扇不许留在 _FSL 0，失败必须留痕。
+
+    旧实现是裸的 `rolled = set_curve("cool")`，而 acpi() 在设备锁/权限故障下会抛
+    —— 异常穿过 set_curve("cool") 出去，回滚半途而废、_FSL 还停在 s0i3 分支
+    刚写下的 0 上，而且一条日志都没有。那条路径刻意用 except OSError 保护了
+    【日志写】，却没保护【回滚本身】，而后者才是保命的那一步。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import subprocess as _sp
+
+    _real_run, _real_open, _real_acpi = _sp.run, builtins.open, pfanel.acpi
+    _real_ready = getattr(pfanel, "_daemon_ready", None)
+
+    class _WedgedEc(Exception):
+        pass
+
+    def _acpi(path, args=""):
+        # 只让【cool 的曲线写】抛：s0i3 自己那一次必须落地，
+        # 否则用例死在回滚之前，测的就不是"回滚抛异常"这件事了。
+        if str(path) == pfanel.EC88 and "0x79 0x00" in str(args):
+            raise _WedgedEc("设备锁/权限故障（模拟）")
+        return _real_acpi(path, args)
+
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "auto", "level": 0}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    pfanel.acpi = _acpi
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    pfanel._daemon_ready = lambda *a, **k: False
+    try:
+        got = pfanel.set_curve("s0i3")   # 抛出去本身就是缺陷
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel.acpi = _real_acpi
+        if _real_ready is None:
+            pfanel.__dict__.pop("_daemon_ready", None)
+        else:
+            pfanel._daemon_ready = _real_ready
+    last = _last_fsl(dev)
+    assert last is not None and last >= pfanel.MIN_SAFE_LEVEL, (
+        "回滚抛异常后最后一次 _FSL 写入是 %r —— 风扇停在 _FSL 0 上且没有日志（0 = 停转）"
+        % (last,)
+    )
+    logtext = _real_open(log, encoding="utf-8").read()
+    assert "回滚未完成" in logtext, (
+        "回滚失败必须如实记录；写成【已回滚到 cool】是一条事后没人能核对的谎：%r"
+        % (logtext,)
+    )
+    assert "回滚未完成" in got, (
+        "返回值必须带出【回滚没完成】，不能谎称已回滚：%r" % (got,)
+    )
+
+
+def test_daemon_ready_waits_for_the_fan_to_settle_before_its_first_read():
+    """终审 I2：第一读之前必须等稳，否则读数比判据早、风扇比判据慢。
+
+    这个函数是在 `acpi(FSL,"1 0") + acpi(EC88, s0i3)` 之后约 0.5s 被调用的，
+    此刻 EC 0x76 报的仍是切换前的转速；守护真在跑而 _FSL 还是 0 时，
+    立刻读到非零就判成"就绪"。auto 分支早就为同一件事等过 1.6s。
+    判据是【顺序】：ec76 读必须排在 settle 等待【之后】，不是"某处有个 sleep"。
+    """
+    import subprocess as _sp
+
+    _real_run, _real_ec, _real_time = _sp.run, pfanel.get_ec76, pfanel.time
+    events = []
+
+    class _Clock:
+        def sleep(self, s):
+            events.append(("sleep", round(float(s), 3)))
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    pfanel.time = _Clock()
+    pfanel.get_ec76 = lambda: (events.append(("ec76",)), 30)[1]
+    _sp.run = lambda *a, **k: _Proc("active\n")
+    try:
+        assert pfanel._daemon_ready(timeout_s=1, interval=0.1) is True, (
+            "守护 active 且设备读回 30 时必须判成就绪，否则正常切换会一直被回滚"
+        )
+    finally:
+        _sp.run = _real_run
+        pfanel.get_ec76 = _real_ec
+        pfanel.time = _real_time
+    kinds = [e[0] for e in events]
+    assert "ec76" in kinds, "本用例根本没有走到读 EC 那一步：%r" % (events,)
+    first_ec = kinds.index("ec76")
+    waits = [v for k, v in events[:first_ec] if k == "sleep"]
+    assert waits, (
+        "第一读 EC 之前一次都没等 —— 读数比判据早：守护刚 restart、_FSL 还是 0 时，"
+        "EC 0x76 报的仍是切换前的转速，读到非零就判成【就绪】。事件=%r" % (events,)
+    )
+    assert max(waits) >= pfanel.HANDOVER_SETTLE_S, (
+        "第一读之前最长只等了 %rs，低于 settle 口径 %rs —— 等得不够久等于没等"
+        % (max(waits), pfanel.HANDOVER_SETTLE_S)
+    )
+
+
+def test_daemon_ready_still_attempts_once_when_settle_eats_the_whole_budget():
+    """settle 大于 timeout_s 时也必须做【至少一次】真实尝试。
+
+    写成 `while now < deadline` 的话，settle 睡完就已经越过 deadline，
+    循环体一次都不执行，直接返回 False —— 那不是"未就绪"，是"没检查"，
+    而调用方会把两者当成同一件事。这里用可控时钟把时间轴摊平来验证。
+    """
+    import subprocess as _sp
+
+    _real_run, _real_ec, _real_time = _sp.run, pfanel.get_ec76, pfanel.time
+    attempts = []
+
+    class _Clock:
+        """虚拟时钟：sleep 只推进虚拟时间，本用例因此是零等待的。"""
+
+        def __init__(self):
+            self.t = 1000.0
+
+        def sleep(self, s):
+            self.t += float(s)
+
+        def time(self):
+            return self.t
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    clock = _Clock()
+
+    def _ec():
+        attempts.append(clock.t)
+        return 30
+
+    pfanel.time = clock
+    pfanel.get_ec76 = _ec
+    _sp.run = lambda *a, **k: _Proc("active\n")
+    try:
+        # settle(5) 恰好等于 timeout_s(5)：老写法在这一档上一次都不试。
+        got = pfanel._daemon_ready(timeout_s=5, interval=1, settle=5)
+    finally:
+        _sp.run = _real_run
+        pfanel.get_ec76 = _real_ec
+        pfanel.time = _real_time
+    assert attempts, (
+        "settle 吃掉了整个预算后一次都没试过就返回 —— 那是【没检查】，不是【未就绪】"
+    )
+    assert got is True, "做了一次真实尝试（守护 active + EC=30）却判未就绪：%r" % (got,)
+
+
+# ---------------- 终审 Minor 4/5：回落下限只有一份，且真的被当常量用 ----------------
+
+
+def test_min_safe_level_is_derived_from_the_shared_floor_not_a_third_copy():
+    """MIN_SAFE_LEVEL 必须【派生】自 pfan_core.L0_MIN，而不是再抄一份 25。
+
+    同一个下限在本仓库里有三处出处：pfan_core.L0_MIN、min(pfan_core.FPS)、
+    以及【本分支新增的】pfanel.MIN_SAFE_LEVEL —— 而新增那处的注释恰好写着
+    "表只有一份"。值相同，所以只断言数值相等根本抓不住它（25 == 25）。
+    真正要守的是"它是派生来的"，所以这里解析 AST 看赋值的右端：
+    字符串包含会被一次自动折行静默废掉（见本文件 test_state_seam_defaults_equal_production
+    记过的 2026-10-08 实例），AST 是结构上的，折行/改引号都影响不到它。
+    """
+    import ast as _ast
+    import inspect
+
+    import pfan_core
+
+    assert pfanel.MIN_SAFE_LEVEL == pfan_core.L0_MIN, (
+        "MIN_SAFE_LEVEL=%r != pfan_core.L0_MIN=%r"
+        % (pfanel.MIN_SAFE_LEVEL, pfan_core.L0_MIN)
+    )
+    assert pfanel.MIN_SAFE_LEVEL == min(pfan_core.FPS), (
+        "L0_MIN 与 _FPS 表最低档分叉了：%r vs %r"
+        % (pfanel.MIN_SAFE_LEVEL, min(pfan_core.FPS))
+    )
+    tree = _ast.parse(inspect.getsource(pfanel))
+    assigns = [
+        n
+        for n in tree.body
+        if isinstance(n, _ast.Assign)
+        and any(isinstance(t, _ast.Name) and t.id == "MIN_SAFE_LEVEL" for t in n.targets)
+    ]
+    assert len(assigns) == 1, "MIN_SAFE_LEVEL 的模块级赋值应恰好一处，实际 %d" % len(assigns)
+    rhs = assigns[0].value
+    assert isinstance(rhs, _ast.Name) and rhs.id == "L0_MIN", (
+        "MIN_SAFE_LEVEL 的右端是 %s 而不是 L0_MIN —— 这是又一份会漂移的硬编码副本"
+        % (_ast.dump(rhs),)
+    )
+
+
+def test_auto_fallback_writes_the_min_safe_level_constant():
+    """auto 分支的兜底档位必须走 MIN_SAFE_LEVEL 常量，不能是又硬编码的 25。
+
+    做法是把常量临时改成一个 25 以外的值再跑 auto 分支：如果实现写的是常量，
+    设备上就是那个新值；如果写的是字面量 25，设备上就是 25 —— 两种实现就此可区分。
+    旧注释曾声称 auto 的兜底值是 MIN_SAFE_LEVEL，实际上那一行写的是硬编码 25，
+    所以这条断言在修复前就是红的。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import subprocess as _sp
+
+    _real_run, _real_open = _sp.run, builtins.open
+    _real_time, _real_ec = pfanel.time, pfanel.get_ec76
+    _real_min = pfanel.MIN_SAFE_LEVEL
+
+    class _NoSleep:
+        def sleep(self, _s):
+            return None
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "auto", "level": 0}, fh)
+    open(dev, "w").close()
+    open(log, "w").close()
+    _sp.run = _systemctl_stub("inactive", _real_run)
+    pfanel.time = _NoSleep()
+    pfanel.get_ec76 = lambda: 0        # 固件没接管 -> 必须兜底
+    pfanel.MIN_SAFE_LEVEL = 33         # 故意与 25 不同
+    pfanel.open = lambda p, *a, **k: (
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
+    try:
+        got = pfanel.set_curve("auto")
+    finally:
+        _sp.run = _real_run
+        pfanel.open = _real_open
+        pfanel.time = _real_time
+        pfanel.get_ec76 = _real_ec
+        pfanel.MIN_SAFE_LEVEL = _real_min
+    assert got == "auto"
+    last = _last_fsl(dev)
+    assert last == 33, (
+        "auto 的兜底写的是 %r 而不是 MIN_SAFE_LEVEL(33) —— 说明那行仍是硬编码字面量" % (last,)
     )
 
 

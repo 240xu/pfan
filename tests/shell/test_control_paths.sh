@@ -226,8 +226,11 @@ PEOF
     PFAN_LOCK="$d/lock" PFAN_CONF="$d/conf" PFAN_CURVE_FILE="$d/curve" \
     PFAN_EMERG_FILE="$d/emerg" PFAN_LOG="$d/pfand.log" \
     bash core/pfand >"$d/out" 2>&1
+  # 退出码落盘而不从函数返回：调用方要的产物一律现读，返回值只当"跑过了"。
+  echo "$?" > "$d/rc"
   return 0
 }
+_ecfg_rc(){ cat "$1/rc" 2>/dev/null || echo 缺; }                # 真实守护的退出码
 _ecfg_cnt(){ grep -c "$2" "$1/pfand.log" 2>/dev/null || true; }   # 日志命中次数
 _ecfg_fsl(){ grep '_FSL 1 ' "$1/dl" 2>/dev/null | tail -1; }      # 假设备累计请求流水末条
 
@@ -261,6 +264,34 @@ chk_ecfg_reject(){ # chk_ecfg_reject <名字> <E> <CAP>
 }
 chk_ecfg_reject e_lt_cap 50 70
 chk_ecfg_reject e_eq_cap 70 70
+
+echo "== T13b: 配置不自洽必须【非零退出】，否则 Restart=on-failure 永不重试 =="
+# core/pfand 自己写着这条规则（:123-125，平台配置不可用的那条 fail-safe 已经 exit 1），
+# 而配置自检这条 fail-safe 曾经是 exit 0。systemd/pfand.service:11-12 写的是
+# Restart=on-failure + RestartSec=15 —— exit 0 等于让守护就此死掉。
+#
+# 为什么这一条是本分支的责任：E == CAP 原本被【放行】（守护降级运行），所以那时
+# 没人关心退出码；本分支把 E <= CAP 收紧成拒绝启动，于是一份原本能跑（虽然降级）的
+# 配置被悄悄转成了 dead-loop。实测 E=70 CAP=70：写 _FSL 1 100 然后 exit 0，
+# 风扇停在 100% 且 15s 后不再重试，只能等人来改配置。
+#
+# 改 exit 1 是严格更好，不是把"降级运行"换成"死循环"：重试的代价是零 ——
+# 每次启动都会重写同一个 fail-safe 档位（就是紧挨着的那行 echo），
+# 重试只是把同一次写入每 15s 重复一遍，配置一改好就自己接管。
+# T13 已经断言假设备最后收到的是 _FSL 1 100，所以"重试重复的是同一次写入"有据。
+_rc13b="$(_ecfg_rc "$T/t13.e_eq_cap")"
+if [ "$_rc13b" = 0 ]; then
+  ng "配置不自洽却 exit 0 —— Restart=on-failure 不会重试，风扇停在 100% 直到有人来改配置"
+elif [ "$_rc13b" = 缺 ]; then
+  ng "没拿到守护的退出码（$T/t13.e_eq_cap/rc 不存在）"
+else
+  ok "配置不自洽非零退出 rc=$_rc13b（15s 后自动重试，配置一改好就自己接管）"
+fi
+# 反向对照：下面的 T13c 用 15s 超时跑自洽配置，它进主循环后被 timeout 杀掉（rc=124），
+# 与"配置不自洽时立刻退出"是两回事，所以只在这里断言"不自洽时不是 124"。
+if [ "$_rc13b" = 124 ]; then
+  ng "配置不自洽时守护没立刻退出而是活到超时 —— 自检是在进主循环之后才判的？"
+fi
 
 echo "== T13c: 反向对照 —— 自洽配置（E=100 CAP=70）必须照常接管，否则这条守卫就成了一律拒绝 =="
 # 少了这一侧，上面两条即使恒真也看不出来。两侧都跑得出不同结论，判据才算被证明可区分。

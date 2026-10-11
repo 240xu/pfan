@@ -94,4 +94,39 @@ for t in test_write_requires_token_even_from_allowed_origin \
   fi
 done
 
+echo "== T6: 设计文档的目标行不得比触发表里【实际关闭】的条数多 =="
+# 这个仓库存在的理由就是不再宣称没验证过的东西，而设计文档自己最容易变成第一个
+# 谎：目标行写「四条被关闭」，触发表里却只有三行打了 ✅ —— 读的人只看目标行。
+# W1 的教训更具体：它的机理经复核根本不成立（guard() 排在 snapshot() 与 DB 写入
+# 之前，持续性异常只会跳过本轮后半段，下一轮开头照常先调 guard()），
+# 但目标行照样把它算进了"已关闭"。
+SPEC=docs/superpowers/specs/2026-10-10-fan-safety-and-honesty-design.md
+if [ -f "$SPEC" ]; then
+  _goal=$(grep -m1 '可达的停转/欠冷却路径被关闭' "$SPEC" || true)
+  if [ -z "$_goal" ]; then
+    ng "SPEC 里找不到「可达的停转/欠冷却路径被关闭」的目标行 —— 条款被删或改写，这条守卫失守"
+  else
+    _num=$(printf '%s' "$_goal" | grep -oE '[0-9]+条|[一二三四五六]条' | head -1)
+    case "$_num" in
+      一条) claim=1 ;; 二条) claim=2 ;; 三条) claim=3 ;; 四条) claim=4 ;;
+      *) claim="${_num%%条}" ;;
+    esac
+    closed=$(grep -cE '^\| \*\*(F|W)[0-9]+\*\*.*✅ 已关闭' "$SPEC" || true)
+    closed=${closed:-0}
+    if [ "$claim" = "$closed" ]; then
+      ok "目标行声称关闭 $claim 条，触发表里恰好 $closed 条标了 ✅"
+    else
+      ng "目标行声称关闭 $claim 条，触发表里只有 $closed 条标了 ✅ —— 目标行是假的：$_goal"
+    fi
+  fi
+  # 反向：W1 必须【不许】出现在已关闭那一列。
+  if grep -qE '^\| \*\*W1\*\*.*✅ 已关闭' "$SPEC"; then
+    ng "W1 被标成已关闭 —— 它的机理经复核不成立（guard 排在 snapshot/DB 之前），本分支并未关闭它"
+  else
+    ok "W1 未被列入已关闭"
+  fi
+else
+  ng "缺 $SPEC"
+fi
+
 echo "test_security_docs: fails=$fails"; exit "$fails"

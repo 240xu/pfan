@@ -21,6 +21,7 @@ import time
 # 硬编码本机路径会让别的机型完全读不到温度 —— 见 docs/specs 的 §2。
 from pfan_core import (  # noqa: F401 (FPS/LEVELS 供 API 用)
     FPS,
+    L0_MIN,
     LEVELS,
     est_rpm,
     nearest_fps,
@@ -68,9 +69,17 @@ PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", _PLAT.get("PANEL_DIR", "/opt/beszel
 VENDOR_DIR = os.environ.get("PFAN_VENDOR_DIR", os.path.join(PANEL_DIR, "vendor"))
 CURVE_FILE = os.environ.get("PFAN_CURVE_FILE", "/var/lib/pfanel/curve.state")
 GUARD_TEMP = 82  # 看门狗阈值：quiet 下超过此温度自动回退（TjMax=100）
-# 回落下限：pfan_core.FPS 表最低档（表只有一份，见 :176），也是 set_curve("auto")
-# 交回失败时的兜底值。0 在 ACPI 里的含义是停转，不是"最低档"。
-MIN_SAFE_LEVEL = 25
+# 交回控制权（_FSL 1 0）之后、读 EC 0x76 之前必须等的稳态时间。
+# 固件接管曲线不是瞬时的，读太快会拿到【切换前】的转速。
+# auto 分支与 _daemon_ready 必须同一口径 —— 两处各写一个 1.6 就是两份事实源，
+# 而它们判的是同一件事（交回有没有生效），所以取常量。
+HANDOVER_SETTLE_S = 1.6
+# 回落下限：直接取 pfan_core.L0_MIN（即 _FPS 表最低档，min(FPS)，表只有一份，
+# 定义在 pfan_core.py:13 附近），【不】在本文件再抄一份字面量。
+# 它是 set_curve("auto") 交回失败、set_curve 的 quiet/cool 回滚交回失败、
+# 以及 apply_persisted_state 还原出不可用档位时，三处共用的兜底档位。
+# 0 在 ACPI 里的含义是停转，不是"最低档"。
+MIN_SAFE_LEVEL = L0_MIN
 
 
 def get_state():
@@ -101,7 +110,7 @@ def get_curve():
     return get_state()["curve"]
 
 
-def _daemon_ready(timeout_s=5, interval=1):
+def _daemon_ready(timeout_s=5, interval=1, settle=HANDOVER_SETTLE_S):
     """守护是不是真的接管了（s0i3 分支的判据）。
 
     两个条件必须【同时】成立：
@@ -115,17 +124,34 @@ def _daemon_ready(timeout_s=5, interval=1):
 
     ② 用 get_ec76() 而不是 get_level()：get_ec76 读 EC 0x76 = 实际转速百分比，
     与 set_curve("auto") 分支判定"交回是否生效"用的是同一个判据（该分支的
-    `if not ec: acpi(FSL, "1 25")` 兜底），两处保持同一套读法；
+    `if not ec: acpi(FSL, "1 %d" % MIN_SAFE_LEVEL)` 兜底），两处保持同一套读法；
     get_level() 读的是 _FST 里的存档档位，守护没起来时
     旧值照样非零，根本测不出这次切换有没有生效。
-    正常守护的档位下限是 25（core/pfand 的 L0/E/CAP 全部 >= 25），所以 ② 不会
-    因为"风扇本来就该慢"而误判。
+    正常守护的档位下限就是 MIN_SAFE_LEVEL（L0/E/CAP 全部 >= L0_MIN），
+    所以 ② 不会因为"风扇本来就该慢"而误判。
+
+    ③ 第一读之前必须先等稳（settle）。这个函数是在 `acpi(FSL,"1 0") +
+    acpi(EC88, s0i3)` 之后约 0.5s 就被调用的，此刻 EC 0x76 报的仍是切换前的转速。
+    守护真在跑（① active）而 _FSL 还是 0 时，立刻读到非零就判成"就绪"——
+    读数比判据早了，风扇比判据慢。auto 分支早就为同一件事等过 1.6s（同一个常量）；
+    这条判据当时没等。落地证据：pfanel.db 的 39570 个采样里有 3200 个 ec76 != level，
+    且全部偏向"风扇还在动"（命令 25 / 实测 44）—— 读早了就读到这个偏差。
+
+    预算口径（延迟不许换来更宽松的判据）：
+      · settle 是【前置】，不额外加在 timeout_s 之上：整次调用的上限仍是 timeout_s。
+        于是 settle 从轮询窗口里扣掉，轮询次数从 ~5 降到 ~4 —— 判据只会更严。
+      · 循环写成 do-while 而不是 `while now < deadline`：若 settle >= timeout_s，
+        后者会【一次都不试】就返回 False。那不是"未就绪"，那是"没检查"，
+        而调用方会把两者当成同一件事。现在任何 timeout_s 下都至少做一次真实尝试。
+      · 剩余时间留不下一整次轮询就不睡（now + interval >= deadline 直接返回），
+        免得整次调用拖过预算。
 
     刻意不调 daemon_alive()：它有 5s 缓存，而守护状态恰好刚被 restart 改动，
     拿缓存当判据会把"没起来"读成"起来了"。
     """
     deadline = time.time() + timeout_s
-    while time.time() < deadline:
+    time.sleep(settle)
+    while True:
         try:
             st = subprocess.run(
                 ["systemctl", "is-active", "pfand"],
@@ -138,8 +164,41 @@ def _daemon_ready(timeout_s=5, interval=1):
                     return True
         except Exception:
             pass
+        now = time.time()
+        if now >= deadline or now + interval >= deadline:
+            return False
         time.sleep(interval)
-    return False
+
+
+def _force_min_safe_level(note):
+    """把 _FSL 直接写成不会停转的下限，并尽力如实记录。
+
+    这个函数【不许抛】。它是最后一道：设备锁坏了、日志目录不可写，都只是少一条线索；
+    反过来一旦抛出去，风扇就留在 _FSL 0 上，而且没有任何记录说明发生过什么 ——
+    那正是这个仓库反复吃过亏的形态。
+
+    返回写入是否被设备确认（acpi() 拿到本次调用自己的 RESULT 行才算数）。
+    日志里如实写"已确认/未确认"，不把没确认的写入记成已完成。
+    """
+    confirmed = False
+    try:
+        confirmed = acpi(FSL, "1 %d" % MIN_SAFE_LEVEL) is not None
+    except Exception:
+        confirmed = False
+    try:
+        with open("/var/log/pfanel.log", "a") as f:
+            f.write(
+                "%s %s -> 直接写 _FSL 1 %d（设备%s）\n"
+                % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    note,
+                    MIN_SAFE_LEVEL,
+                    "已确认" if confirmed else "未确认",
+                )
+            )
+    except Exception:
+        pass
+    return confirmed
 
 
 def set_curve(name):
@@ -154,15 +213,17 @@ def set_curve(name):
         # 所以必须【先切 cool 再交回】，且交回后校验 EC 非零，不足则兜底。
         acpi(EC88, "4 181 0x79 0x00 0")
         acpi(FSL, "1 0")
-        time.sleep(1.6)
+        time.sleep(HANDOVER_SETTLE_S)
         ec = get_ec76()
         if not ec:  # 交回没生效 → 绝不留停转
-            acpi(FSL, "1 25")
-            ec = 25
+            # 兜底档位取 MIN_SAFE_LEVEL（= pfan_core.L0_MIN），不写死 25：
+            # 同一个数、同一个意图，抄一份就多一处会漂移的副本。
+            acpi(FSL, "1 %d" % MIN_SAFE_LEVEL)
+            ec = MIN_SAFE_LEVEL
             with open("/var/log/pfanel.log", "a") as f:
                 f.write(
-                    "%s auto: _FSL 0 未交回成功(EC=%s)，已兜底 25%%\n"
-                    % (time.strftime("%Y-%m-%d %H:%M:%S"), ec)
+                    "%s auto: _FSL 0 未交回成功(EC=%s)，已兜底 %d%%\n"
+                    % (time.strftime("%Y-%m-%d %H:%M:%S"), ec, MIN_SAFE_LEVEL)
                 )
         subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
     elif name == "free":
@@ -181,13 +242,22 @@ def set_curve(name):
         # 这两步刚把 _FSL 留在 0 上，守护不来就等于把风扇停在 0，所以必须验。
         subprocess.run(["systemctl", "restart", "pfand"], capture_output=True)
         if not _daemon_ready():
-            # 先回滚再记日志：回滚是保命的那一步，不能让它被一次日志写失败顶掉
-            # （/var/log 不可写时 raise 出去，风扇就留在 _FSL 0 上没人管）。
-            rolled = set_curve("cool")  # cool 下固件接管，_FSL 0 不会停转
+            # ① 救风扇优先：回滚本身【不许】成为那条会失败的路径。
+            # 旧实现是裸的 `rolled = set_curve("cool")`，而 acpi() 在设备锁/权限故障下
+            # 会抛 —— 异常穿过 set_curve("cool") 出去，回滚半途而废、_FSL 还停在 0 上，
+            # 而且一条日志都没有（下面那个 except OSError 防的正是"日志失败顶掉回滚"，
+            # 它保护了日志，却没保护回滚本身）。
+            try:
+                rolled = set_curve("cool")  # cool 下固件接管，_FSL 0 不会停转
+            except Exception as e:
+                # 回滚抛了也不能就这么走：直接把 _FSL 写成不会停转的下限。
+                # 返回值标成未完成而不是谎称已回滚 —— 事后没人能核对的谎比异常更难查。
+                _force_min_safe_level("cool 回滚未完成(%s)" % (e,))
+                rolled = "cool(回滚未完成)"
             try:
                 with open("/var/log/pfanel.log", "a") as f:
                     f.write(
-                        "%s s0i3 拉起 pfand 失败（守护未就绪或设备读回档位 0），已回滚到 %s\n"
+                        "%s s0i3 拉起 pfand 失败（守护未就绪或设备读回档位 0），回滚结果：%s\n"
                         % (time.strftime("%Y-%m-%d %H:%M:%S"), rolled)
                     )
             except OSError:
@@ -201,6 +271,21 @@ def set_curve(name):
         subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
         acpi(FSL, "1 0")
         acpi(EC88, "4 181 0x79 0x%02X 0" % val)
+        # 交回后置条件：上面这两行只把 _FSL 留在 0 上就返回了，全程没有验证
+        # EC 有没有真的接管。cool/quiet 是【固件】曲线，_FSL 0 在固件手里【相信】是
+        # 安全的 —— 但这一分支同时是 s0i3 拉起守护失败后的自动安全网，那条路上
+        # "固件接管"从未被验证过。于是一次没验证的操作成了承重结构：
+        # EC 写不进去（楔住的 EC，与守护起不来同一故障类）时，EC 仍停在 s0i3、
+        # _FSL 停在 0、风扇停转，而 cool 不在 GUARDED 里，没有任何东西在看它。
+        # 判据与 auto 分支完全一致：读回非零才算交回成功；读不出来（None）
+        # 与读到 0 同类 —— 读不出来时无法排除停转，必须按最坏情况兜底。
+        # 刻意【不】抄 auto 分支那 1.6s：它在 auto 里的作用是避免固件还没接管完时
+        # 误读成 0（代价只是一次多余的安全写入），而 quiet/cool 是用户主动切的
+        # 健康路径，写接口本来就已经 sleep 2s，再加 1.6s 是纯延迟。两处读法一致，
+        # 延迟的有无是各自路径的性质，不是同一件事。
+        ec = get_ec76()
+        if not ec:
+            _force_min_safe_level("%s: _FSL 0 未交回成功(EC=%s)" % (name, ec))
     save_state(curve=name)
     return name
 
