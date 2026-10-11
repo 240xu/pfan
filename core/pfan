@@ -14,6 +14,13 @@ fi
 # 本文件不再出现具体 ACPI 路径 —— 唯一例外是候选清单，它在 platform/fan-candidates.txt。
 PLAT_CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 [ -f "$PLAT_CAND" ] || PLAT_CAND="${PFAN_CANDIDATES:-/etc/pfan/fan-candidates.txt}"
+# 面板目录的出厂值同样来自 example：detect 必须把它写进生成的 platform.conf。
+# 不写的话，任何跑过 detect 的机器上 pfanel.py 的 _PLAT.get("PANEL_DIR", <代码兜底>)
+# 都读不到该键、静默落回代码里的字面量，而 deploy.sh / smoke.sh 读的是这个 example
+# —— 两个源，只是今天恰好相同（9eb0043 当时把它称作单一事实源；
+#   2026-10-11 实测目标机 /etc/pfan/platform.conf 里 '^PANEL_DIR=' 为 0 行）。
+# 接缝 PFAN_PLATFORM_EXAMPLE 供测试把 example 换成带哨兵值的一份；生产从不设置。
+PLAT_EXAMPLE="${PFAN_PLATFORM_EXAMPLE:-$(dirname "$0")/../platform/platform.conf.example}"
 # 测试接缝：真实控制路径需要 /dev/pfanctl 与 /run/pfanel.lock（都要 root），
 # 单测用 PFAN_DEV=/dev/null + PFAN_LOCK=<临时文件> 覆盖。生产从不设置。
 # 预设应用要写的权威文件与要重启的守护（与 pfand 的 PFAN_CONF 同一个接缝）
@@ -133,6 +140,14 @@ detect(){
   printf -v out '%s\n' \
     "EC_ROOT=$ec" "FAN_DEVICE=$fan" "THERMAL_ZONE=$zone" \
     "DEV=$DEV" "EC_CMD=0xB5"
+  # 面板目录也写出来（理由见文件头 PLAT_EXAMPLE）。值取自仓库 example，不抄字面量 ——
+  # 抄一份就等于又立一个事实源，正是这一段要消除的东西。
+  local panel
+  panel=$(sed -n 's/^PANEL_DIR=//p' "$PLAT_EXAMPLE" 2>/dev/null | head -1)
+  # 空值不写：pfanel.py 的 get() 只看 key 在不在，空字符串会被当成有效路径
+  # （PANEL_DIR="" -> VENDOR_DIR="vendor" -> 面板从进程 cwd 读）。宁可 detect 失败。
+  [ -n "$panel" ] || { echo "pfan detect: $PLAT_EXAMPLE 没声明 PANEL_DIR —— 拒绝写出空值（pfanel 会把空串当路径，面板从 cwd 读）" >&2; return 9; }
+  printf -v out '%s\n' "$out" "PANEL_DIR=$panel"
   if [ "${1:-}" = "--write" ]; then
     [ -n "${2:-}" ] || { echo "pfan detect: --write 需要目标路径" >&2; return 6; }
     # 原子写：直接 printf > "$2" 中途崩溃会留下半截配置，下次开机 fail-close。

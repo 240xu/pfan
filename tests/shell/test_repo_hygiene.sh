@@ -220,6 +220,26 @@ fi
 grep -qE '^PANEL_DIR=' platform/platform.conf.example \
   && ok "platform.conf.example 声明了 PANEL_DIR（单一事实源）" \
   || ng "platform.conf.example 没有 PANEL_DIR —— 三处派生会各自落回默认"
+# 判据三之三：已存在但【缺 PANEL_DIR】的 platform.conf 必须被幂等补上，两个条件分开判。
+# 2026-10-11：`pfan detect --write` 直到本次提交才写 PANEL_DIR，而 deploy 只在文件
+# 【缺失】时写它 —— 凡此前跑过 detect 的机器上都没有该键（实测目标机
+# `sudo grep -c '^PANEL_DIR=' /etc/pfan/platform.conf` = 0），pfanel.py 于是静默落回
+# 代码里的字面量兜底，与本脚本/smoke.sh 读 example 分歧。
+#
+# ⚠ 这是【结构守卫】：deploy.sh 的这一段是远端 sudo 段，本机跑不起来，只能判形态。
+# 能抓的是两种真实退化 —— 幂等门被删（每次部署都追加一行）、追加语句被删
+# （目标机永远拿不到该键）。抓不到的是远端执行本身失败（那要真机部署才验）。
+_b3a=$(awk '/3a\. 平台配置/,/fan-candidates\.txt/' scripts/deploy.sh)
+if printf '%s\n' "$_b3a" | grep -q "grep -q '\^PANEL_DIR='"; then
+  ok "deploy.sh 补 PANEL_DIR 前先判该键在不在（重复部署不重复追加）"
+else
+  ng "deploy.sh 补 PANEL_DIR 没有幂等门 —— 每次部署都会再追加一行"
+fi
+if printf '%s\n' "$_b3a" | grep -q 'echo PANEL_DIR=\$PANEL_DIR >> /etc/pfan/platform.conf'; then
+  ok "deploy.sh 把已解析的 \$PANEL_DIR 追加进 platform.conf（补的就是这次部署到的目录）"
+else
+  ng "deploy.sh 没有把 \$PANEL_DIR 追加进 platform.conf —— 已存在但缺该键的机器永远补不上"
+fi
 # 判据四：smoke 必须把 vendor 路由放进【被遍历的 URL 列表】。注意实际形态是
 # `for u in /pfan.css ... /pfan-vendor-uplot.js ...` —— 路径在 for 的列表里，
 # 请求由循环体内的 curl 发出。所以判据是"出现在 for 列表中"，不是"同行有 curl"。

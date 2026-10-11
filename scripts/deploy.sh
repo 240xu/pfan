@@ -197,8 +197,17 @@ R "set -e
     if [ ! -f /etc/pfan/platform.conf ]; then
       sudo -n install -m 644 '$STAGE/platform.conf.example' /etc/pfan/platform.conf
       echo '  /etc/pfan/platform.conf 由 example 建立'
-    else
+    elif sudo -n grep -q '^PANEL_DIR=' /etc/pfan/platform.conf; then
       echo '  /etc/pfan/platform.conf 已存在，保留原值'
+    else
+      # 已存在但缺 PANEL_DIR：`pfan detect --write` 直到本次提交才写这一键,凡是此前
+      # 跑过 detect 的机器上都没有它 -> pfanel.py 的 _PLAT.get("PANEL_DIR", <代码兜底>)
+      # 静默落回代码里的字面量,而本脚本与 smoke.sh 读的是仓库 example:两个源。
+      # 只在【缺该键】时补一行,所以重复部署是幂等的(第二次走上面的分支,不再补)。
+      # 补的值是本脚本已经解析出来的 $PANEL_DIR,不是 example 里的值:补进去的必须是
+      # 这次实际部署到的那个目录,否则又和 $PDIR 分叉,正是这里要消除的东西。
+      sudo -n sh -c 'echo PANEL_DIR=$PANEL_DIR >> /etc/pfan/platform.conf'
+      echo "  /etc/pfan/platform.conf 缺 PANEL_DIR,已补=$PANEL_DIR"
     fi
     sudo -n install -m 644 '$STAGE/fan-candidates.txt' /etc/pfan/fan-candidates.txt
     # 3b. 加载器（pfan/pfand 的 _plat_sh 默认路径）

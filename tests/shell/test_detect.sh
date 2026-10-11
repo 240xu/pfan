@@ -53,4 +53,57 @@ if [ -f "$TMP/out.conf" ] && pfan_ok=$(PFAN_PLATFORM_CONF="$TMP/out.conf" bash -
   ok "写盘后可被 pfan_plat 读回: $pfan_ok"
 else ng "--write 未生成可读配置 (有文件=$([ -f "$TMP/out.conf" ] && echo y || echo n))"; fi
 
+echo "== T6: detect --write 必须写出 PANEL_DIR，否则 pfanel 会落回硬编码兜底 =="
+# 2026-10-09 的 9eb0043 把面板目录改成从 platform.conf 派生，并声称成了单一事实源。
+# 但 `pfan detect --write` 只输出 5 个键、不含 PANEL_DIR，而 deploy 只在文件【缺失】时
+# 写 platform.conf —— 于是任何已经跑过 detect 的机器上，pfanel.py 的
+# _PLAT.get("PANEL_DIR", <兜底>) 读不到该键、静默落回代码里的字面量，而
+# deploy.sh / smoke.sh 读的是仓库 example 的值。两个源，只是今天恰好相同。
+# 实测 2026-10-11：目标机 `sudo grep -c '^PANEL_DIR=' /etc/pfan/platform.conf` = 0。
+#
+# 判据不能只是"输出里有 PANEL_DIR="。detect 若自己抄一份字面量写出去，那条断言照样绿，
+# 而单一事实源恰恰被打破 —— 一条看不见自己失败的断言比没有断言更危险。
+# 所以这里断言【值取自仓库 example】：造一份 PANEL_DIR=哨兵 的 example、用接缝指过去，
+# 输出必须跟着哨兵走。抄字面量的实现会在这里露馅（哨兵 != 字面量）。
+# 接缝 PFAN_PLATFORM_EXAMPLE 与 PLAT_CAND 同形（core/pfan 里相邻定义），
+# 生产从不设置它。
+_ex="$TMP/example.conf"
+sed "s|^PANEL_DIR=.*|PANEL_DIR=$TMP/sentinel-panel|" platform/platform.conf.example > "$_ex"
+# 注意：detect --write 结束时会把 "已写入 <path>" 打到【stdout】，配置本体在文件里。
+# 所以必须把这次调用的 stdout 丢掉再单独读文件，否则命令替换里混进那句话，
+# 断言在实现修好之后依然会红（判据落在错误的对象上）。
+PFAN_THERMAL_DIR="$TMP/za" PFAN_ACPI_PROBE="ok:\_SB.PCI0.LPCB.EC0" \
+  PFAN_PLATFORM_EXAMPLE="$_ex" \
+  bash core/pfan detect --write "$TMP/out6.conf" >/dev/null 2>&1
+_got=$(sed -n 's/^PANEL_DIR=//p' "$TMP/out6.conf" 2>/dev/null | head -1)
+if [ "$_got" = "$TMP/sentinel-panel" ]; then
+  ok "detect --write 的 PANEL_DIR 取自仓库 example（不是抄一份字面量）: $_got"
+else
+  ng "detect --write 的 PANEL_DIR='${_got:-<没有这一键>}'，期望 '$TMP/sentinel-panel' —— 漏写或抄字面量都落到这里"
+fi
+# 对照：不设接缝的正常路径必须写出仓库 example 里那个真实值。
+# 少了这一条，上面那条在【默认路径整个坏掉、只有接缝路径还通】时照样绿。
+_exreal=$(sed -n 's/^PANEL_DIR=//p' platform/platform.conf.example | head -1)
+PFAN_THERMAL_DIR="$TMP/za" PFAN_ACPI_PROBE="ok:\_SB.PCI0.LPCB.EC0" \
+  bash core/pfan detect --write "$TMP/out6r.conf" >/dev/null 2>&1
+_gotreal=$(sed -n 's/^PANEL_DIR=//p' "$TMP/out6r.conf" 2>/dev/null | head -1)
+if [ "$_gotreal" = "$_exreal" ] && [ -n "$_exreal" ]; then
+  ok "默认路径写出的 PANEL_DIR = example 的值: $_gotreal"
+else
+  ng "默认路径 PANEL_DIR='${_gotreal:-<没有这一键>}' != example 的 '${_exreal:-<example 没声明>}'"
+fi
+# 反向控制：example 缺 PANEL_DIR 时 detect 必须拒绝，不能写出 PANEL_DIR= 空值。
+# pfanel.py 的 get() 只看 key 在不在 —— 空字符串会被当成有效路径
+# （PANEL_DIR="" -> VENDOR_DIR="vendor" -> 面板从进程 cwd 读）。这条判的是"拒绝"，
+# 上面两条判的是"值对"，方向不同，缺一不可。
+grep -v '^PANEL_DIR=' platform/platform.conf.example > "$TMP/ex_nopanel.conf"
+rc6c=0
+PFAN_THERMAL_DIR="$TMP/za" PFAN_ACPI_PROBE="ok:\_SB.PCI0.LPCB.EC0" \
+  PFAN_PLATFORM_EXAMPLE="$TMP/ex_nopanel.conf" \
+  bash core/pfan detect --write "$TMP/out6c.conf" >/dev/null 2>&1 || rc6c=$?
+if [ "$rc6c" -ne 0 ] && [ ! -f "$TMP/out6c.conf" ]; then
+  ok "example 缺 PANEL_DIR 时 detect 拒绝落盘（rc=$rc6c）"
+else
+  ng "example 缺 PANEL_DIR 时 detect 仍写出配置（rc=$rc6c 存在=$([ -f "$TMP/out6c.conf" ] && echo y || echo n)）—— 会写出 PANEL_DIR= 空值，pfanel 把空串当路径"
+fi
 echo "test_detect: fails=$fails"; exit "$fails"
