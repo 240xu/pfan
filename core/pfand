@@ -190,8 +190,18 @@ for _k in IDLE T1 T2 T3 T4 T5 L0 L1 L2 L3 L4 L5 EMERG E EMERG_REL CAP TRIM GAIN 
 done
 if [ "$_cfg_bad" = "0" ]; then
     # 进入阈值必须高于退出阈值，否则应急形同虚设
-    if [ "$EMERG_REL" -ge "$EMERG" ] || [ "$T5" -ge "$EMERG" ] || [ "$L5" -gt "$CAP" ]; then
-        log "配置不自洽(EMERG_REL=$EMERG_REL EMERG=$EMERG T5=$T5 L5=$L5 CAP=$CAP) -> fail-safe 满速 100% 并退出"
+    #
+    # 应急档 E 还必须【高于】日常硬上限 CAP，相等也不行：
+    #   E < CAP -> 最热温度 want_for() 直接返回 E，比日常上限还弱。实测 E=50 CAP=70
+    #             被放行，85°C 启动对齐写 _FSL 1 50，日志却记「立即满速 50%」
+    #             —— 既是欠冷却（最热时风扇比平时上限还慢），也是谎报。
+    #   E = CAP -> 「应急」与日常上限无差别，等于没有应急。
+    # 面板那份 validate_params 只挡 E < CAP（server/pfan_core.py:55），没挡相等；
+    # 守护这份自检比它严一档，依据就是上面第二条 —— 相等同样不是应急。
+    # 出厂两套预设与 example 都是 E=100 CAP=70，严格这条不会误伤任何现役配置。
+    if [ "$EMERG_REL" -ge "$EMERG" ] || [ "$T5" -ge "$EMERG" ] || [ "$L5" -gt "$CAP" ] \
+       || [ "$E" -le "$CAP" ]; then
+        log "配置不自洽(EMERG_REL=$EMERG_REL EMERG=$EMERG T5=$T5 L5=$L5 E=$E CAP=$CAP) -> fail-safe 满速 100% 并退出"
         _cfg_bad=1
     fi
     # 档位下界：L0 不能低于 _FPS 表最低档（25），E/CAP/各级也不能为 0。

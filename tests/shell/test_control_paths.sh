@@ -186,5 +186,95 @@ echo "== T12: 配置自校验必须挡住会【停转】的下界（E/CAP/L* ≤
 _rc=/root/backups/_cfgchk-probe
 grep -qE 'L0.*< *25|_cfg_bad.*L0|\[ "\$E" -lt' core/pfand && ok "pfand 自检含档位下界判断" || ng "pfand 自检没有档位下界判断（E=0 / CAP=0 可通过 → 停转）"
 grep -qE '\[ "\$E" -lt ' core/pfand && ok "显式检查 E 的下界" || ng "没有显式检查 E 的下界"
+
+echo "== T13: 配置自检必须拒绝 E <= CAP（否则最热温度写一个比日常上限更弱的档，日志还写「立即满速」）=="
+# 复核自 spec F4（实测）：E=50 CAP=70 被自检放行，启动对齐在 85°C 直接写 _FSL 1 50
+# 并记「立即满速 50%」—— 应急比日常上限 CAP=70 还弱，日志却声称满速。
+# 既是欠冷却（最热时风扇比平时上限还慢）也是谎报（日志说"立即满速"）。
+# 面板那份 validate_params 早就有 E<CAP 的判据（server/pfan_core.py），守护这份自检
+# 是它的真子集 —— 子集看不见父集看得见的东西。
+#
+# 判据全部落在【设备侧】与【日志】上，一行源码都不看：
+#   a) 日志记「不自洽」，且【没有】参数来源横幅（横幅只在自检通过、进主循环之后才打）
+#   b) 假设备收到的最后一次请求是 _FSL 1 100（fail-safe 满速）
+#   c) 假设备的回读流水里一条 _FST 都没有（进了主循环就必然有一次 getL 回读）
+# 上面 T12 是个 grep 源码的守卫：判据被整段删掉它照样绿。这里不能重复那个错，
+# 所以断言的是真实守护在假设备上的行为。
+#
+# 产物一律留在用例目录里由断言现读，不用 | 分隔的结果串往回传 —— 结果串里的 | 一旦
+# 进到 pattern 里就会被当成 case 的分支分隔符，把判据变成永远不触发的死代码。
+_ecfg_run(){ # _ecfg_run <用例目录> <E> <CAP> <超时秒>；跑真实守护，产物留在用例目录
+  local d="$1" e="$2" cap="$3" tmo="$4"
+  mkdir -p "$d"
+  : > "$d/dev"; : > "$d/dl"; : > "$d/out"; : > "$d/pfand.log"
+  rm -f "$d/st" "$d/emerg" "$d/dl.cnt" "$d/lock"
+  printf '{"curve":"s0i3"}\n' > "$d/curve"
+  echo 85000 > "$d/temp"                # 热区文件是毫摄氏度；85C >= EMERG(80) 必进应急
+  # 热区路径逐用例不同，必须现场生成。值里的前导反斜杠在未加引号的 heredoc 里原样保留
+  # （反斜杠只在 $ ` \ 换行 前才是转义符），与 platform/*.conf 的写法一致。
+  cat > "$d/plat.conf" <<PEOF
+EC_ROOT=\_SB.PCI0.LPCB.EC0
+FAN_DEVICE=\_SB.PCI0.LPCB.EC0.TFN1
+THERMAL_ZONE=$d/temp
+DEV=$d/dev
+PEOF
+  # 只换 E/CAP 两行，其余参数全部沿用出厂配置：DWELL/IV 等照常，
+  # 免得用例顺手放宽了别的条件、把失败原因搅浑。
+  sed "s/^E=100$/E=$e/; s/^CAP=70$/CAP=$cap/" config/pfand.conf.example > "$d/conf"
+  timeout "$tmo" env PFAN_PLATFORM_CONF="$d/plat.conf" PFAN_DEV="$d/dev" \
+    PFAN_DMESG=fake/bin/dmesg PFAN_DMESG_STATE="$d/st" PFAN_DMESG_LOG="$d/dl" \
+    PFAN_LOCK="$d/lock" PFAN_CONF="$d/conf" PFAN_CURVE_FILE="$d/curve" \
+    PFAN_EMERG_FILE="$d/emerg" PFAN_LOG="$d/pfand.log" \
+    bash core/pfand >"$d/out" 2>&1
+  return 0
+}
+_ecfg_cnt(){ grep -c "$2" "$1/pfand.log" 2>/dev/null || true; }   # 日志命中次数
+_ecfg_fsl(){ grep '_FSL 1 ' "$1/dl" 2>/dev/null | tail -1; }      # 假设备累计请求流水末条
+
+chk_ecfg_reject(){ # chk_ecfg_reject <名字> <E> <CAP>
+  local name="$1" e="$2" cap="$3" d="$T/t13.$1" devtail n_bad n_loop n_fst
+  _ecfg_run "$d" "$e" "$cap" 12
+  devtail=$(tail -1 "$d/dev" 2>/dev/null)
+  n_bad=$(_ecfg_cnt "$d" '不自洽'); n_bad=${n_bad:-0}
+  n_loop=$(_ecfg_cnt "$d" '参数来源'); n_loop=${n_loop:-0}
+  n_fst=$(grep -c '_FST' "$d/dl" 2>/dev/null || true); n_fst=${n_fst:-0}
+  if [ "$n_bad" -eq 0 ]; then
+    ng "$name: E=$e CAP=$cap 被自检【放行】—— 85°C 写 _FSL 1 $e（比日常上限 CAP=$cap 还弱）却记「立即满速」"
+    echo "        设备尾=${devtail:-空} 流水末条=$(_ecfg_fsl "$d") 回读=$n_fst 次 日志末行=$(tail -1 "$d/pfand.log" 2>/dev/null)"
+    return
+  fi
+  ok "$name: 自检拒绝 E=$e CAP=$cap 并记不自洽: $(grep '不自洽' "$d/pfand.log" | tail -1 | cut -c21-96)"
+  if [ "$n_loop" -ne 0 ]; then
+    ng "$name: 记了不自洽却仍进了主循环: $(grep '参数来源' "$d/pfand.log" | tail -1 | cut -c21-96)"
+  else
+    ok "$name: 没有进主循环（无参数来源横幅）"
+  fi
+  case "$devtail" in
+    *'._FSL 1 100') ok "$name: 假设备最后收到的是 fail-safe 满速: $devtail" ;;
+    *) ng "$name: 假设备最后收到的不是满速 100: ${devtail:-空}" ;;
+  esac
+  if [ "$n_fst" -ne 0 ]; then
+    ng "$name: 假设备被回读了 _FST $n_fst 次 —— 自检之后并没有立刻退出"
+  else
+    ok "$name: 假设备一次都没被回读（确实在进主循环前就退出了）"
+  fi
+}
+chk_ecfg_reject e_lt_cap 50 70
+chk_ecfg_reject e_eq_cap 70 70
+
+echo "== T13c: 反向对照 —— 自洽配置（E=100 CAP=70）必须照常接管，否则这条守卫就成了一律拒绝 =="
+# 少了这一侧，上面两条即使恒真也看不出来。两侧都跑得出不同结论，判据才算被证明可区分。
+_d="$T/t13.coherent"
+_ecfg_run "$_d" 100 70 15
+_nbad=$(_ecfg_cnt "$_d" '不自洽'); _nbad=${_nbad:-0}
+_nloop=$(_ecfg_cnt "$_d" '参数来源'); _nloop=${_nloop:-0}
+if [ "$_nbad" -ne 0 ]; then
+  ng "自洽配置 E=100 CAP=70 被误拒 —— 守卫过宽: $(grep '不自洽' "$_d/pfand.log" | tail -1 | cut -c21-96)"
+elif [ "$_nloop" -eq 0 ]; then
+  ng "自洽配置 E=100 CAP=70 没能进主循环 —— 反向对照失败，T13 的判据没被证明可区分"
+else
+  ok "自洽配置照常接管并按应急满速（E=100 > CAP=70）: $(_ecfg_fsl "$_d")"
+fi
+
 echo
 echo "test_control_paths: fails=$fails"; exit "$fails"
