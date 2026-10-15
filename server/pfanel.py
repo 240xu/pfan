@@ -660,8 +660,18 @@ _tok = None
 
 
 def get_token():
-    """写操作的 Token。首次启动生成 0600 文件；同源页面经 HTML 注入拿到，
-    跨站页面受同源策略限制读不到 → 阻断 CSRF。"""
+    """写操作的 Token。首次启动生成 0600 文件；由 _panel() 注入面板脚本。
+
+    ⚠️ 它【不是】身份认证：_panel() 把真值替换进 app.js 的 __PFAN_TOKEN__，而
+    /pfan、/pfan.js 是免鉴权 GET —— 于是任何能访问面板的客户端（跨站浏览器、curl、
+    任何脚本）一次 GET 就拿到了。同源策略在这里保护不了任何东西：这个 token 是
+    被【故意】放进一份公开可取的脚本里的。
+
+    仍然成立的部分：do_POST 的 token 判定是【无条件】的（_deny + return，在 Origin
+    检查之前）。Origin 白名单是另一道门、性质不同：它是【浏览器 CSRF 边界】—— 跨站
+    页面必须带 Origin 而脚本伪造不了；但脚本客户端自己就能写 Origin，所以它挡不住
+    curl。真正的边界是网络可达性，见 SECURITY.md「写边界究竟是什么」。
+    """
     global _tok
     if _tok:
         return _tok

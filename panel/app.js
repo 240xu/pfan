@@ -8,7 +8,7 @@ import { checkTempOrder, classColor, curveParamsHtml, curveRowsHtml, dbOf, decim
          xSortedFlag, DEFAULT_STALE_AGE, staleAgeLimit } from "/pfan-core.js";
 
 const API="";   // 同源：反代 /pfan -> 8789，用相对路径即可
-const TOKEN="__PFAN_TOKEN__";   // 由服务端注入；跨站页面读不到（同源策略）
+const TOKEN="__PFAN_TOKEN__";   // 服务端注入真值；/pfan.js 免鉴权 ⇒ 任何能访问面板者一次 GET 就拿到，同源策略不保护它。挡住跨站【浏览器】的是浏览器模型（无 ACAO 读不回响应、脚本报不出带该自定义头的跨域请求），不是保密；curl 两样都能做。详见 SECURITY.md
 // 0 已移除：实测 _FSL 0 在 s0i3 下 = 风扇停转（2026-10-06），不允许从 UI 停扇
 const LV=[25,30,40,50,60,70,80,85,90,95,100];
 // curLevel 必须【声明】：模块永远是严格模式，`curLevel=d.level` 这种未声明赋值
