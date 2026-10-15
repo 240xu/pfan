@@ -864,24 +864,45 @@ else
     fi
   fi
 
-  # ---- 25d: carve-out 必须在真实文件上真的成立，且不能顺手放过邻居 ----
-  # 三行：两个必须被 carve-out 放掉，一个（同一文件里的真实目标）必须照拦。
+  # ---- 25d: carve-out 必须【只】剩主机那一侧，且登录名一侧零排除 ----
+  # 六行探针，两个方向同时钉：
+  #   · 第 1、4、5、6 行 —— 登录名分别是 root / rootpw / myroot / roots，主机都是外部的。
+  #     四行【必须】全部被拦。中间版本只拦后三行，放过第 1 行（登录名恰好 root），而
+  #     那正是这道门最该拦的形态：账号名 + 外部机器。2026-10-15 撤掉了那个排除。
+  #   · 第 2 行 —— 唯一留下的 carve-out：host 恰为 localhost。它【必须】不报。
+  #   · 第 3 行 —— 同一文件里的真实登录目标，必须照拦，证明 carve-out 没顺手放过邻居。
   # 格式串里【一个 @ 都不写】—— 注释与格式串本身也在扫描范围内，而把 @ 和主机名
   # 直接写进格式串的话，@ 前面的 "s"（%s 的尾巴）会拿 % 当左边界、以自己为登录名
   # 把本文件判成命中。% 之后接域名看起来像"没写 @"，其实恰好是最坏的一种写法。
   _f_some='some''host'
   _f_root='ro''ot'
+  _f_rootpw='root''pw'
+  _f_myroot='my''root'
+  _f_roots='roo''ts'
   _f_ex='example''.com'
-  printf '%s%s%s\n%s%s%s\n%s%s%s\n' \
+  printf '%s%s%s\n%s%s%s\n%s%s%s\n%s%s%s\n%s%s%s\n%s%s%s\n' \
     "$_f_root" "$_f_at" "$_f_ex" \
     "$_f_user" "$_f_at" localhost \
-    "$_f_user" "$_f_at" "$_f_some" > "$_probe"
+    "$_f_user" "$_f_at" "$_f_some" \
+    "$_f_rootpw" "$_f_at" "$_f_ex" \
+    "$_f_myroot" "$_f_at" "$_f_ex" \
+    "$_f_roots" "$_f_at" "$_f_ex" > "$_probe"
   _out=$(bash scripts/sanitize.sh 2>/dev/null)
-  _n_probe=$(printf '%s\n' "$_out" | grep -cE "^  $_probe:")
-  if [ "$_n_probe" -eq 1 ] && printf '%s\n' "$_out" | grep -oE "^  $_probe:[0-9]+" | grep -q ":3$"; then
-    ok "carve-out 成立：root 开头与 host 为 localhost 的两行都不报，同一文件里真实的登录目标照拦"
+  # 期望被拦的行号（升序）。第 2 行不在其中 —— 它是刻意留下的 carve-out。
+  _want25d="1 3 4 5 6 "
+  _got25d=$(printf '%s\n' "$_out" | grep -oE "^  $_probe:[0-9]+" \
+    | grep -oE '[0-9]+$' | sort -n | tr '\n' ' ')
+  if [ "$_got25d" = "$_want25d" ]; then
+    ok "carve-out 只剩主机一侧：localhost 那行放过，登录名为 root/rootpw/myroot/roots 的四行全拦"
   else
-    ng "carve-out 不对：探针里应当只有第 3 行（真实登录目标）被拦，实际报了 $_n_probe 行"
+    ng "carve-out 不对：期望拦下第 $_want25d 行，实际拦下第 $_got25d 行"
+    printf '%s\n' "$_out" | grep -E "^  $_probe:" | sed 's/^/       /'
+  fi
+  # 拦下来的必须出自这一条规则，而不是碰巧被别的规则兜住。
+  if printf '%s\n' "$_out" | grep -E "^  $_probe:" | grep -qF '带用户名的远端目标'; then
+    ok "这五行确实由「带用户名的远端目标」这条规则拦下（不是别的规则碰巧兜住）"
+  else
+    ng "探针的命中里没有「带用户名的远端目标」这条规则 —— 25d 可能在测一个不相干的洞"
   fi
 
   _t25_clean
