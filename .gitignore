@@ -14,6 +14,9 @@ __pycache__/
 *.token
 .superpowers/
 
-# 脱敏门的本地配置：项目特有的禁止项与逐条豁免，都不该提交
+# 脱敏门里只有"本机特有的额外禁止项"是不该提交的。
+# 逐条豁免（scripts/sanitize.allow）必须跟着仓库走：它原先被忽略而且根本不存在，
+# 于是「门报红 → 写进 allow → 门变绿」这条路在新克隆和任何 fork 上都是断的 ——
+# 门对所有人恒红，唯一能过的树是作者本机那份不存在的文件。豁免清单本身就是
+# 复审材料：别人 clone 下来能读到每一处「这里为什么可以留」。
 scripts/sanitize.local
-scripts/sanitize.allow

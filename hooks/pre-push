@@ -7,7 +7,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 echo "== pre-push: 脱敏门（公开前的硬阻断）=="
 # 为什么放在 ci 之前：ci 证明代码是对的，sanitize 证明它【可以公开】。后者一旦
 # 漏掉就不可逆 —— 内网地址、公网入口主机名、私钥路径一旦推上去就等于公开。
-# 豁免走 scripts/sanitize.allow（gitignored），所以本机可以用它放行本机专属的行。
+# 豁免走 scripts/sanitize.allow —— 已提交、跟着仓库走，别人 clone 下来看到同一份清单与同一批理由；要放行新的一行就改它，并把理由写进同一个提交。
 # ⚠ 平时 push【不】被脱敏拦住：命中的都是作者自己的网络信息，在私有仓库里它们
 #   本来就该在（代码里的 PFAN_HOST 默认值删了就坏）。条数每次规则一改就变，所以
 #   这里【不】写死 —— 要看多少条跑 `bash scripts/sanitize.sh`。一旦漏推出去就不可逆，所以

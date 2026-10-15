@@ -96,7 +96,12 @@ fi
 step "sanitize gate (scripts/sanitize.sh)"
 bash scripts/sanitize.sh > "$HOME/.cache/pfan-sanitize.txt" 2>&1
 _san_rc=$?
-_n=$(grep -cE '^  [a-zA-Z][^ ]*:[0-9]+' "$HOME/.cache/pfan-sanitize.txt" 2>/dev/null || echo 0)
+# ⚠ `|| echo 0` 是错的，而且只有门【全绿】时才暴露：grep -c 没有匹配时既打印 0 又
+#   退出 1，于是 `|| echo 0` 会把 "0" 再追加一行，`[ "$_n" -gt 0 ]` 收到 "0\n0"
+#   就报 `integer expected`。门在豁免清单提交之前恒红（61 处命中），grep 退出 0，
+#   那条 `||` 从来没被触发 —— 缺陷一直在，只是看不见。门变绿才第一次现身。
+_n=$(grep -cE '^  [a-zA-Z][^ ]*:[0-9]+' "$HOME/.cache/pfan-sanitize.txt" 2>/dev/null)
+_n=${_n:-0}
 echo "  命中 $_n 处（详见 bash scripts/sanitize.sh）"
 # ⚠ 这里【不】让 ci 失败：命中的是本仓库作者自己的网络信息，它们【本来就该在】——
 #   （条数每加一条规则就变，所以下面那句"命中 $_n 处"是从脚本输出数的，不写死。）

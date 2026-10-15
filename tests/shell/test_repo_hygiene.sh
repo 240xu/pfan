@@ -698,6 +698,174 @@ else
     ok "T24 探针已清除：文件与 git index 都无残留"
   fi
 fi
+echo "== T25: 豁免清单必须逐条必要，且不能把门变成空门 =="
+# 这条守卫针对 2026-10-10 之前的状态：scripts/sanitize.allow 在 .gitignore 里，而且
+# 根本不存在。于是「门报红 → 写进 allow → 门变绿」这条路在新克隆和任何 fork 上都是
+# 断的：门对所有人恒红（含作者自己），唯一能过的树是本机那份不存在的文件。
+# 它提交进仓库之后，多出两条必须钉死的义务 —— 少一条，"全绿"就换了个意思：
+#   1) 每条豁免都【单独】必要。删掉任何一条，门必须对它覆盖的那些行转红。
+#      不钉的话，早晚有人会往里补一条 ^docs/.*$ 之类的宽模式，门从此恒绿而什么都不
+#      再拦 —— 而"恒绿"正是这个门对外唯一可观察的输出。
+#   2) 同类别的新命中仍然被拦。豁免钉的是【行号】不是文件，所以同一个文件里新写的
+#      一行照拦。两条一起才说明绿是"这 61 行被有理由地豁免了"，不是"门没长牙"。
+#
+# 实现取巧的地方必须说清楚：为什么不是"真的删一条、跑一遍门"。26 条各跑一次全仓库
+# 扫描实测 3m38s（单次门 ≈ 8s），CI 跑不起。这里改成：把 allow 临时挪开【一次】拿到门
+# 的原始命中清单（这一步是真的跑门），再对每条豁免算"它是否独占覆盖了至少一行"。
+# 两者等价：一条豁免独占覆盖 0 行 ⇔ 删掉它门不会变红。
+# 挪动全程 trap 兜底；`_allow` 与 `_allow.t25` 都不会被扫（后者不在 git ls-files 里）。
+_allow="scripts/sanitize.allow"
+_stash=""
+_t25_restore() {
+  cd "$repo" 2>/dev/null || return 0
+  if [ -n "$_stash" ]; then mv -f "$_stash" "$_allow" 2>/dev/null; _stash=""; fi
+  return 0
+}
+
+if ! git ls-files --error-unmatch "$_allow" >/dev/null 2>&1; then
+  ng "$_allow 没有被 git 跟踪 —— fresh clone 与 fork 上门恒红且无处可豁免"
+  git check-ignore -q "$_allow" 2>/dev/null \
+    && ng "$_allow 仍在 .gitignore 里（git check-ignore 命中）—— 就是它当初让门无处可豁免"
+else
+  ok "$_allow 已提交（fresh clone 与 fork 读到同一份豁免清单）"
+
+  _probe="scratch-t25-probe.txt"
+  trap _t25_restore EXIT INT TERM
+  _t25_clean() {
+    _t25_restore
+    cd "$repo" 2>/dev/null || return 0
+    rm -f "$_probe"
+    git rm --cached --force -q "$_probe" 2>/dev/null
+    git reset -q -- "$_probe" 2>/dev/null
+    return 0
+  }
+  trap _t25_clean EXIT INT TERM
+
+  # ---- 25a: 门现在必须自己就绿（allow 文件在场）----
+  _san=$(bash scripts/sanitize.sh 2>/dev/null)
+  if printf '%s\n' "$_san" | grep -q '^  \[ok\]'; then
+    ok "当前树过得了自己的门（豁免清单生效后 0 命中）"
+  else
+    ng "豁免清单已在，但树仍然过不了自己的门 —— 有命中没被豁免到："
+    printf '%s\n' "$_san" | grep -E '^  [^ ]+:[0-9]+  \[' | sed 's/^/       /' | head -20
+  fi
+
+  # ---- 25b: 逐条必要性 ----
+  # 把 allow 挪开跑一次门，拿到【原始】命中清单（这才是每条豁免在替谁顶罪）。
+  mv -f "$_allow" "$_allow.t25" 2>/dev/null && _stash="$_allow.t25"
+  if [ -z "$_stash" ]; then
+    ng "临时挪开 $_allow 失败 —— 逐条必要性这条断言无效"
+  else
+    _raw=$(bash scripts/sanitize.sh 2>/dev/null | grep -oE '^  [^ ]+:[0-9]+' | sed 's/^  //')
+    mv -f "$_stash" "$_allow" 2>/dev/null; _stash=""
+    _n_raw=$(printf '%s\n' "$_raw" | grep -c .)
+    if [ "$_n_raw" -lt 1 ]; then
+      ng "挪开 allow 之后门一个命中都不报 —— 豁免清单【不是】在替这棵树顶罪，它要么是空的，要么规则已经瞎了"
+    else
+      ok "挪开 allow 后门报出 $_n_raw 处原始命中（豁免清单确实在顶罪）"
+
+      _entries=()
+      while IFS= read -r _l; do
+        case "$_l" in ''|'#'*) continue ;; esac
+        _entries+=("${_l%%$'\t'*}")
+      done < "$_allow"
+      _n_ent=${#_entries[@]}
+      if [ "$_n_ent" -lt 1 ]; then
+        ng "$_allow 里一条豁免都没有 —— 门要么本来就绿（规则瞎了），要么靠 scripts/sanitize.local"
+      else
+        _dead=""; _uncovered=""
+        for _i in "${!_entries[@]}"; do
+          _excl=0
+          for _h in $_raw; do
+            [[ $_h =~ ${_entries[$_i]} ]] || continue
+            _others=0
+            for _j in "${!_entries[@]}"; do
+              [ "$_j" = "$_i" ] && continue
+              [[ $_h =~ ${_entries[$_j]} ]] && _others=$((_others + 1))
+            done
+            [ "$_others" -eq 0 ] && _excl=$((_excl + 1))
+          done
+          [ "$_excl" -eq 0 ] && _dead="$_dead ${_entries[$_i]}"
+        done
+        # 反向：每处原始命中都必须被至少一条豁免覆盖（否则门不可能是绿的）
+        for _h in $_raw; do
+          _cov=0
+          for _j in "${!_entries[@]}"; do
+            [[ $_h =~ ${_entries[$_j]} ]] && _cov=$((_cov + 1))
+          done
+          [ "$_cov" -eq 0 ] && _uncovered="$_uncovered $_h"
+        done
+        if [ -z "$_dead" ]; then
+          ok "$_n_ent 条豁免逐条都必要（每条都独占覆盖至少一处命中，删掉任何一条门都会转红）"
+        else
+          ng "这些豁免删掉也不会让门变红（覆盖的行被别人全包了 = 死重量）：$_dead"
+        fi
+        if [ -z "$_uncovered" ]; then
+          ok "$_n_raw 处原始命中全部被至少一条豁免覆盖（清单与门一一对得上）"
+        else
+          ng "这些命中没有被任何豁免覆盖，可门却是绿的 —— 清单与实现对不上：$_uncovered"
+        fi
+      fi
+    fi
+  fi
+
+  # ---- 25c: 同类别的新命中仍然被拦 ----
+  # ⚠ 探针字符串照样【拆成碎片再拼】：本测试文件自己也在门的扫描范围内。
+  _f_at='@'
+  _f_user='dep''loy'
+  _f_ip='10.44.''7.21'
+  printf 'lan: %s\nprobe: ssh %s%s%s true\n' "$_f_ip" "$_f_user" "$_f_at" "$_f_ip" > "$_probe"
+  git add -N "$_probe" 2>/dev/null
+  if ! git ls-files | grep -qx "$_probe"; then
+    ng "探针没进 git ls-files —— 25c 的探针机制坏了，后面的断言无效"
+  else
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -E "^  $_probe:1 " | grep -qF '私网地址'; then
+      ok "同类别的新私网地址仍然被拦（新行不在任何豁免的行号里）"
+    else
+      ng "门放过了一个全新的私网地址 —— 豁免钉的不是行号，是整个文件"
+    fi
+    if printf '%s\n' "$_out" | grep -E "^  $_probe:2 " | grep -qF '带用户名的远端目标'; then
+      ok "同类别的新登录目标（用户名 + @ + 私网地址）仍然被拦"
+    else
+      ng "门放过了一个全新的登录目标 —— 豁免宽到把新写的同类内容也放过了"
+    fi
+  fi
+
+  # ---- 25d: carve-out 必须在真实文件上真的成立，且不能顺手放过邻居 ----
+  # 三行：两个必须被 carve-out 放掉，一个（同一文件里的真实目标）必须照拦。
+  # 格式串里【一个 @ 都不写】—— 注释与格式串本身也在扫描范围内，而把 @ 和主机名
+  # 直接写进格式串的话，@ 前面的 "s"（%s 的尾巴）会拿 % 当左边界、以自己为登录名
+  # 把本文件判成命中。% 之后接域名看起来像"没写 @"，其实恰好是最坏的一种写法。
+  _f_some='some''host'
+  _f_root='ro''ot'
+  _f_ex='example''.com'
+  printf '%s%s%s\n%s%s%s\n%s%s%s\n' \
+    "$_f_root" "$_f_at" "$_f_ex" \
+    "$_f_user" "$_f_at" localhost \
+    "$_f_user" "$_f_at" "$_f_some" > "$_probe"
+  _out=$(bash scripts/sanitize.sh 2>/dev/null)
+  _n_probe=$(printf '%s\n' "$_out" | grep -cE "^  $_probe:")
+  if [ "$_n_probe" -eq 1 ] && printf '%s\n' "$_out" | grep -oE "^  $_probe:[0-9]+" | grep -q ":3$"; then
+    ok "carve-out 成立：root 开头与 host 为 localhost 的两行都不报，同一文件里真实的登录目标照拦"
+  else
+    ng "carve-out 不对：探针里应当只有第 3 行（真实登录目标）被拦，实际报了 $_n_probe 行"
+  fi
+
+  _t25_clean
+  trap - EXIT INT TERM
+  if [ -e "$_probe" ] || git ls-files | grep -qx "$_probe"; then
+    ng "T25 跑完探针还留在仓库里（文件或 git index 都有残留）"
+  else
+    ok "T25 探针已清除：文件与 git index 都无残留"
+  fi
+  if [ -e "$_allow" ]; then
+    ok "$_allow 已放回原处"
+  else
+    ng "$_allow 不见了 —— 挪开时没放回来"
+  fi
+fi
+
 echo
 echo "test_repo_hygiene: fails=$fails"
 exit "$fails"
