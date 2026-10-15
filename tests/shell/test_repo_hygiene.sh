@@ -306,6 +306,38 @@ else
   ok "spec 里该声称已带限定/订正说明"
 fi
 
+echo "== T26: 文档不得把【已存在的东西】记成未完成 =="
+# 2026-10-10：OPERATIONS.md 的发布前置条件里，sanitize.sh 明明存在且 rc=0，
+# 那一行却还写着「脚本尚不存在」。发布清单谎报自己的状态比没有清单更糟 ——
+# 半年后作者会照着它相信仓库还没准备好。
+# ⚠ 判据必须是【存在性】，不能只判措辞：`状态：未完成` 本身可能完全正当
+# （确实有活没干），所以这里对每个点名的东西真的去 test -e。
+for _p in scripts/sanitize.sh; do
+  # ⚠ 正则与路径必须分开：上一版把 sed 出来带反斜杠的字符串直接喂给 [ -e ]，
+  # 于是 test 的是一个名字里真带反斜杠的文件 —— 永远不存在，于是永远 ok。
+  # 守卫自己恒绿，正是它要防的那类缺陷。
+  _re=$(printf '%s' "$_p" | sed 's/[.[\*^$]/\\&/g')
+  if grep -qE "$_re" docs/OPERATIONS.md 2>/dev/null \
+     && grep -qE '尚未创建|脚本尚不存在' docs/OPERATIONS.md 2>/dev/null; then
+    if [ -e "$_p" ]; then
+      ng "docs/OPERATIONS.md 仍称 $_p 尚未创建 —— 它存在（发布清单谎报自己的状态）"
+    else
+      ok "$_p 确实不存在，状态行成立"
+    fi
+  else
+    ok "docs/OPERATIONS.md 不再把 $_p 记成尚未创建"
+  fi
+done
+# 反向：豁免是【有意的保留】，文档必须点名它，不能只说「已处理」。
+# 门本身在 scripts/sanitize.sh，它才有豁免清单；所以「逐条豁免」这句必须与它对齐。
+if grep -q '未删除、已逐条豁免' docs/OPERATIONS.md 2>/dev/null \
+   && grep -q 'sanitize.allow' docs/OPERATIONS.md 2>/dev/null; then
+  ok "OPERATIONS.md 说明 LAN 地址是【逐条豁免】并点名 sanitize.allow（不是含糊的「已处理」）"
+else
+  ng "OPERATIONS.md 未说明 LAN 地址的保留方式是逐条豁免 —— 读者会以为该删没删"
+fi
+echo
+
 echo "== T16: 恢复点必须由【安装清单】派生，而不是手抄路径列表 =="
 # 专家审计 I-1 + 我实测：原 T12 只检查那 10 个路径的【文本】出现在第 1 步窗口里。
 # 变异证明 —— 把备份循环清空、把路径名留在注释里，T12 的 7 条断言全绿。

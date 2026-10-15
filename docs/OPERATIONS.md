@@ -169,10 +169,10 @@ bash scripts/smoke.sh          # 回滚后必须全绿
 
 本仓库**即将公开**。翻转 visibility 之前必须满足：
 
-1. `scripts/sanitize.sh` 已实现且通过（扫描隧道 UUID、LAN IP、token、私钥、记忆文档、`audit/`）
-   —— **状态：未完成**（`scripts/` 里只有 ci/deploy/install-hooks/smoke-lib/smoke，脚本尚不存在）
-2. 本文档与 `scripts/smoke.sh` 中的 LAN 子网已按 sanitize 规则处理
-   —— **状态：未完成**（两者仍含 `192.168.1.0/24` / `192.168.1.10`）
+1. `scripts/sanitize.sh` **已实现且通过**（rc=0，5 条规则 / 26 条豁免），但覆盖面比本条原先列的窄 ——
+   **token、记忆文档、`audit/`、隧道 UUID 无对应规则**（规则全清单与理由见本节末「发布门的覆盖范围」）。
+2. LAN 地址**未删除、已逐条豁免**（`scripts/sanitize.allow` 第 4 组「私网地址」）：本文档第 17/39/46/220/274 行
+   与 `scripts/smoke.sh:19`（`PFAN_HOST` 缺省值，须与 `deploy.sh:10` 一致）。删不掉，理由见末注。（`192.168.1.0/24`）
 3. `server/pfanel.py` 的 Origin 白名单已配置化（backlog ②⑤），不再硬编码 IP
    —— **状态：已完成**（`PFAN_ORIGIN_ALLOW` 环境变量可覆盖；
    缺省 `DEFAULT_ORIGINS` 仍含本机 LAN IP，属预期缺省，测试断言缺省=生产值）
@@ -299,3 +299,22 @@ stat -c '%F %a' /dev/pfanctl     # 必须是 character special file 600
 ```
 
 （`insmod` 失败才回滚：`sudo -n insmod /root/backups/pfanctl-rebuild-<ts>/pfanctl.ko`）
+
+## 发布门的覆盖范围（2026-10-10 核实）
+
+`bash scripts/sanitize.sh --list` 是唯一的事实源 —— 它打印的就是扫描时用的那份，
+不是散文。当前编译出 **5 条规则**：私钥路径、macOS 用户目录、自有域名、
+带用户名的远端目标（account + host，含邮箱形态）、私网地址。另有 26 条豁免，
+在 `scripts/sanitize.allow` 里逐条钉死「文件:行号」并写了理由。
+
+**门扫不到的**（发布前须人工过一遍）：
+
+- **token** —— 没有对应规则。`/var/lib/pfanel/token` 的值若被提交，门不会拦。
+- **记忆文档 / `audit/`** —— 没有对应规则。它们的路径里没有本门认识的那五类特征。
+- **隧道 UUID** —— 没有对应规则。目前仓库里也不存在 UUID 字面量，所以「没规则」
+  暂时不构成实际暴露；一旦写进去，门不会拦。
+
+**LAN 地址为什么保留而不替换成占位符**：放行规则要和目标机上真跑的命令逐字一致，
+否则照文档操作的人会去放行一个错误的网段。`scripts/smoke.sh` 的 `PFAN_HOST` 缺省值还必须
+与 `scripts/deploy.sh` 的那个一致，否则冒烟探的是另一台机器。这是「故意留着」，
+不是遗漏 —— 判断依据是 `scripts/sanitize.allow` 第 4 组逐条写着的理由。

@@ -129,4 +129,27 @@ else
   ng "缺 $SPEC"
 fi
 
+echo "== T7: SECURITY.md 不得把 token 说成写路径的鉴权边界 =="
+# 2026-10-09 外部审计：pfanel.py 的 _panel() 把 __PFAN_TOKEN__ 注入 app.js，
+# 而 /pfan、/pfan.js 是【免鉴权 GET】——所以「持有有效 token」对任何能访问面板的人都是
+# 现成的，curl 一次 GET 就有。SECURITY.md 却把它写成写接口的保护栏。
+# 任何由客户端自己提交的 HTTP 门都能被 curl 满足（含 Origin、Host）；脚本客户端唯一
+# 伪造不了的是【一个从未被传输的秘密】，而这里它被发到了公网上。
+# 这条守卫钉住"如实描述"，防止它被改回去。命名用 T7：本文件里 T6 已被 SPEC 那条占用。
+if grep -qE '必须带有效 .?X-Pfan-Token.?，\*\*无条件\*\*' SECURITY.md; then
+  ng "SECURITY.md 仍把 token 描述为无条件保护 —— 它是无鉴权 GET 就能拿到的值"
+else
+  ok "SECURITY.md 不再把 token 说成写路径的鉴权边界"
+fi
+grep -qE '非浏览器客户端|无鉴权客户端|curl.{0,12}GET 就有了|应用层不认证任何人' SECURITY.md \
+  && ok "SECURITY.md 明说了非浏览器客户端取到 token 的情形" \
+  || ng "SECURITY.md 没有说明非浏览器客户端等同无鉴权"
+# 反向：文档若只写"上一节是假的"，读者会以为整个安全模型都不成立。
+# 三条仍有效的边界 + guard 上限必须同时在文，否则矫枉过正。
+for kw in 'Origin 白名单是真实有效的浏览器 CSRF 边界' '不发 ACAO' 'GUARD_TEMP' '隧道的可达性就是边界'; do
+  grep -q "$kw" SECURITY.md && ok "SECURITY.md 保留了仍然成立的边界：$kw" || \
+    ng "SECURITY.md 缺「$kw」—— 只写失效的一面会让读者以为整个安全模型是假的"
+done
+echo
+
 echo "test_security_docs: fails=$fails"; exit "$fails"
