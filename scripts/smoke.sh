@@ -56,21 +56,50 @@ for s in pfanctl pfand pfanel; do
 done
 
 printf '\n=== 2. API 形状（LAN）===\n'
+# 等 level 的预算上限（秒）。计数器按 2s 步进，所以最坏情况实际等到 46s；
+# 下面那行会把【真实等到的秒数】打出来，不用猜。测试可把它调小：
+# tests/shell/test_guards.sh 用它跑"永远为 0 仍然失败"，否则那一条要在 CI 里真睡 46 秒。
+WAIT_LEVEL0_MAX="${PFAN_WAIT_LEVEL0_MAX:-45}"
+
 # ⚠ 先等守护写出第一个档位再断言：pfand 每次启动都会先 ensure_s0i3()，而那一步
-# 会写 _FSL 1 0（s0i3 的握手序列，固件在此期间不转），随后才写真正的档位。这个
-# 窗口约 1.2s（实测），一个 IV 之内自愈。deploy.sh 刚重启过 pfand 时立刻跑 smoke
-# 就会正好采到 level=0，误报成"风扇停转 + API 字段缺失"（2026-10-10 实测踩到）。
-# 这里最多等 25s，让 smoke 不再替守护的启动握手背锅。
+# 会写 _FSL 1 0（s0i3 的握手序列，固件在此期间不转），随后才写真正的档位。
+# deploy.sh 刚重启过 pfand/pfanel 时立刻跑 smoke 就会正好采到 level=0，误报成
+# "风扇停转 + API 字段缺失"（2026-10-10 实测踩到）。
+#
+# 窗口有多长：要吸收的不只是握手那一段，还有 pfanel 的 snapshot 缓存 —— 它带 age
+# （线上实测 age≈7s），重启瞬间还能报出重启前的 level=0（deploy.sh 那句"pfanel 的
+# snapshot 有缓存"就是这个）。2026-10-10 重启 pfanel 实测：level=0 持续 ≥10s，
+# 约 30s 才回到正常档位 —— 比原来 25s 的预算还长，于是守卫把自己护的东西报成了故障。
+# 上界取 45s 是给这个 30s 留 50% 余量。两边错的方向不对称：上界偏小会把一台正在
+# 自愈的健康机器报成故障（踩到的就是这条），偏大只是让真故障晚 20s 报出来。
+# 正常情况第一轮就 break，一次 sleep 都不睡。
+#
+# 判据必须是结构化的：条件是【level 这个字段的值等于 0】，不是【这几个字符按这个
+# 顺序出现过】。原来那句 `case "$j" in *'"level":0'*)` 是把结构事实退化成文本近似，
+# 而服务实际发的是 `"level": 0`（json.dumps 默认分隔符，冒号后有空格）—— 永远失配，
+# 循环第一轮就 break，这个守卫等了 0 秒，等于没有。实测同一份负载只差一个空格：
+# 带空格 → 1 次轮询 / 0s；不带空格 → 14 次轮询 / 26s（2026-10-10 修）。
+# 比较也交给 jq 按【数值】做：0.0 同样算 0，不会在 shell 里被当成两个字符串。
+# jq 本来就在下面每一条断言里用着。
+#
+# "取"和"等"合成一个循环：原来的取数循环无条件 break，一个响应都重试不了 ——
+# 同样是"守卫不会转"。这里每轮取一次、取到就判，不够就接着等。
 _waited=0
 while :; do
-  j=$(timeout 20 curl -fsS --max-time 12 "$API/api/now" 2>/dev/null) && break
-  j=""
-  break
-done
-while [ "$_waited" -lt 25 ]; do
-  case "$j" in *'"level":0'*) ;; *) break ;; esac
-  sleep 2; _waited=$((_waited + 2))
   j=$(timeout 20 curl -fsS --max-time 12 "$API/api/now" 2>/dev/null) || j=""
+  # 三个状态分开写，别把它们压成一个 if —— 压在一起就会有人后来"简化"掉其中一个。
+  if [ -z "$j" ]; then
+    _zero=1    # 没取到：继续等，别拿空串去断言
+  elif printf '%s' "$j" | jq -e '.level == 0' >/dev/null 2>&1; then
+    _zero=1    # level 就是 0：握手窗口，继续等
+  else
+    _zero=0    # 就绪
+  fi
+  # 缺 level、level=null、JSON 坏了 —— jq 都判成"不是 0"，于是这里直接就绪并退出，
+  # 由下面的字段齐全/越界断言报红。那种负载不是握手窗口，是真故障，不该被等掉。
+  [ "$_zero" = 1 ] || break
+  [ "$_waited" -lt "$WAIT_LEVEL0_MAX" ] || break
+  sleep 2; _waited=$((_waited + 2))
 done
 [ -n "$j" ] || bad "LAN $API/api/now 不可达"
 if [ "$_waited" -gt 0 ]; then
