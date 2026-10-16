@@ -730,21 +730,29 @@ else
     ok "T24 探针已清除：文件与 git index 都无残留"
   fi
 fi
-echo "== T25: 豁免清单必须逐条必要，且不能把门变成空门 =="
+echo "== T25: 豁免清单必须逐条必要、逐条不宽，且不能把门变成空门 =="
 # 这条守卫针对 2026-10-10 之前的状态：scripts/sanitize.allow 在 .gitignore 里，而且
 # 根本不存在。于是「门报红 → 写进 allow → 门变绿」这条路在新克隆和任何 fork 上都是
 # 断的：门对所有人恒红（含作者自己），唯一能过的树是本机那份不存在的文件。
-# 它提交进仓库之后，多出两条必须钉死的义务 —— 少一条，"全绿"就换了个意思：
+# 它提交进仓库之后，多出三条必须钉死的义务 —— 少一条，"全绿"就换了个意思：
 #   1) 每条豁免都【单独】必要。删掉任何一条，门必须对它覆盖的那些行转红。
 #      不钉的话，早晚有人会往里补一条 ^docs/.*$ 之类的宽模式，门从此恒绿而什么都不
 #      再拦 —— 而"恒绿"正是这个门对外唯一可观察的输出。
-#   2) 同类别的新命中仍然被拦。豁免钉的是【行号】不是文件，所以同一个文件里新写的
-#      一行照拦。两条一起才说明绿是"这 61 行被有理由地豁免了"，不是"门没长牙"。
+#   2) 豁免不能比它声称的宽。这条是 2026-10-16 把锚定从【行号】换成【内容指纹】
+#      之后才补上的：行号锚定时"同文件里新写的行照拦"是免费得到的，换成内容锚定
+#      就得单独验 —— 一条锚在太短的片段上的豁免，会顺带放过同一文件里任何含这个
+#      片段的新行。25c/25f 钉这一半。
+#   3) 锚定不能脆。指纹锚定就是为了让"在豁免行上面插一段话"不再转红，25e 钉这一半。
+# 三条一起才说明绿是"这 50 处被有理由地豁免了"，不是"门没长牙"。
 #
 # 实现取巧的地方必须说清楚：为什么不是"真的删一条、跑一遍门"。26 条各跑一次全仓库
-# 扫描实测 3m38s（单次门 ≈ 8s），CI 跑不起。这里改成：把 allow 临时挪开【一次】拿到门
+# 扫描实测 3m38s（单次门实测 2s 上下，机器负载高时更久），CI 跑不起。这里改成：
+# 把 allow 临时挪开【一次】拿到门
 # 的原始命中清单（这一步是真的跑门），再对每条豁免算"它是否独占覆盖了至少一行"。
 # 两者等价：一条豁免独占覆盖 0 行 ⇔ 删掉它门不会变红。
+# ⚠ 本测试【自己重算一遍指纹与判定】，不复用 sanitize.sh 的 _exempt_by：两处实现
+#   各算各的，才谈得上"两边对得上"。它同时是第二处 sha256 实现（sha256 就是为了让
+#   两边算出同一个值才选的；cksum 只有 32 位 CRC，不够）。
 # 挪动全程 trap 兜底；`_allow` 与 `_allow.t25` 都不会被扫（后者不在 git ls-files 里）。
 _allow="scripts/sanitize.allow"
 _stash=""
@@ -782,60 +790,148 @@ else
     printf '%s\n' "$_san" | grep -E '^  [^ ]+:[0-9]+  \[' | sed 's/^/       /' | head -20
   fi
 
-  # ---- 25b: 逐条必要性 ----
+  # ---- 25b: 逐条必要性（指纹锚定） ----
   # 把 allow 挪开跑一次门，拿到【原始】命中清单（这才是每条豁免在替谁顶罪）。
   mv -f "$_allow" "$_allow.t25" 2>/dev/null && _stash="$_allow.t25"
   if [ -z "$_stash" ]; then
     ng "临时挪开 $_allow 失败 —— 逐条必要性这条断言无效"
   else
-    _raw=$(bash scripts/sanitize.sh 2>/dev/null | grep -oE '^  [^ ]+:[0-9]+' | sed 's/^  //')
+    _raw_all=$(bash scripts/sanitize.sh 2>/dev/null | grep -oE '^  [^ ]+:[0-9]+' | sed 's/^  //')
     mv -f "$_stash" "$_allow" 2>/dev/null; _stash=""
+    _n_pairs=$(printf '%s\n' "$_raw_all" | grep -c .)
+    # ⚠ 按 file:line 去重再往下算：同一行被两条规则命中时门会印两遍（一规则一遍），
+    #   不去重的话「这个指纹对应几处出现」会被数成 2，一条没问题的豁免会误报变宽。
+    _raw=$(printf '%s\n' "$_raw_all" | sort -u)
     _n_raw=$(printf '%s\n' "$_raw" | grep -c .)
     if [ "$_n_raw" -lt 1 ]; then
       ng "挪开 allow 之后门一个命中都不报 —— 豁免清单【不是】在替这棵树顶罪，它要么是空的，要么规则已经瞎了"
     else
-      ok "挪开 allow 后门报出 $_n_raw 处原始命中（豁免清单确实在顶罪）"
+      ok "挪开 allow 后门报出 $_n_pairs 处原始命中、去重后 $_n_raw 处位置（豁免清单确实在顶罪）"
 
-      _entries=()
-      while IFS= read -r _l; do
-        case "$_l" in ''|'#'*) continue ;; esac
-        _entries+=("${_l%%$'\t'*}")
+      # 条目按三段拆开：<文件正则><TAB><指纹表><TAB><理由>
+      _e_file=(); _e_hash=()
+      while IFS=$'\t' read -r _f1 _f2 _f3 _rest; do
+        case "$_f1" in ''|'#'*) continue ;; esac
+        _e_file+=("$_f1"); _e_hash+=("$_f2")
       done < "$_allow"
-      _n_ent=${#_entries[@]}
+      _n_ent=${#_e_file[@]}
       if [ "$_n_ent" -lt 1 ]; then
         ng "$_allow 里一条豁免都没有 —— 门要么本来就绿（规则瞎了），要么靠 scripts/sanitize.local"
       else
-        _dead=""; _uncovered=""
-        for _i in "${!_entries[@]}"; do
-          _excl=0
-          for _h in $_raw; do
-            [[ $_h =~ ${_entries[$_i]} ]] || continue
-            _others=0
-            for _j in "${!_entries[@]}"; do
-              [ "$_j" = "$_i" ] && continue
-              [[ $_h =~ ${_entries[$_j]} ]] && _others=$((_others + 1))
-            done
-            [ "$_others" -eq 0 ] && _excl=$((_excl + 1))
+        # ---- 形态检查：锚点必须是"钉死一个文件 + 64 位指纹"，不能是通配大范围 ----
+        _wide=""; _badhash=""
+        for _i in "${!_e_file[@]}"; do
+          case "${_e_file[$_i]}" in
+            '^'*'$') ;;
+            *) _wide="$_wide ${_e_file[$_i]}(未用 ^…$ 锚死)" ;;
+          esac
+          case "${_e_file[$_i]}" in
+            *'*'*) _wide="$_wide ${_e_file[$_i]}(含通配)" ;;
+          esac
+          for _one in $(printf '%s' "${_e_hash[$_i]}" | tr ',' ' '); do
+            _h_clean=1
+            case "$_one" in *[!0-9a-f]*) _h_clean=0 ;; esac
+            [ "$_h_clean" = 1 ] && [ "${#_one}" = 64 ] || _badhash="$_badhash ${_one}"
           done
-          [ "$_excl" -eq 0 ] && _dead="$_dead ${_entries[$_i]}"
         done
-        # 反向：每处原始命中都必须被至少一条豁免覆盖（否则门不可能是绿的）
-        for _h in $_raw; do
-          _cov=0
-          for _j in "${!_entries[@]}"; do
-            [[ $_h =~ ${_entries[$_j]} ]] && _cov=$((_cov + 1))
-          done
-          [ "$_cov" -eq 0 ] && _uncovered="$_uncovered $_h"
-        done
-        if [ -z "$_dead" ]; then
-          ok "$_n_ent 条豁免逐条都必要（每条都独占覆盖至少一处命中，删掉任何一条门都会转红）"
+        if [ -z "$_wide" ] && [ -z "$_badhash" ]; then
+          ok "$_n_ent 条豁免的文件列全部 ^…$ 锚死且不含通配，指纹列全部是 64 位十六进制"
         else
-          ng "这些豁免删掉也不会让门变红（覆盖的行被别人全包了 = 死重量）：$_dead"
+          [ -n "$_wide" ] && ng "这些豁免的文件列不是钉死的单文件锚点：$_wide"
+          [ -n "$_badhash" ] && ng "这些指纹不是 64 位十六进制：$_badhash"
         fi
-        if [ -z "$_uncovered" ]; then
-          ok "$_n_raw 处原始命中全部被至少一条豁免覆盖（清单与门一一对得上）"
+
+        # ---- 每处原始命中的指纹与"在本文件内是否唯一"，各算一次 ----
+        # ⚠ 唯一性是豁免的第三个条件（同一份内容在同一文件里出现两次就不放行），
+        #   所以复算它，否则本测试算出来的覆盖关系与门不一致。
+        # ⚠ sha256sum 找不到就让这些断言【报红】而不是跳过：算不出指纹时"没有一条
+        #   豁免覆盖任何命中"必然成立，放行 = fail-open。
+        _h_ok=0
+        command -v sha256sum >/dev/null 2>&1 && _h_ok=1
+        command -v shasum    >/dev/null 2>&1 && _h_ok=1
+        if [ "$_h_ok" = 0 ]; then
+          ng "找不到 sha256sum / shasum —— 本测试自己算不出指纹，逐条必要性这条断言无效"
         else
-          ng "这些命中没有被任何豁免覆盖，可门却是绿的 —— 清单与实现对不上：$_uncovered"
+          _k_f=(); _k_n=(); _k_h=(); _k_u=()
+          _t_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+                      else shasum -a 256 | awk '{print $1}'; fi; }
+          for _hl in $_raw; do
+            _kf=${_hl%:*}; _kn=${_hl##*:}
+            _kt=$(awk -v n="$_kn" 'NR==n {print; exit}' "$_kf" 2>/dev/null)
+            _k_f+=("$_kf"); _k_n+=("$_kn")
+            _k_h+=("$(_t_sha <<<"$_kt")")
+            _kd=$(grep -cFx -e "$_kt" -- "$_kf" 2>/dev/null) || _kd=0
+            _k_u+=("$_kd")
+          done
+          _hash_in() { # _hash_in <指纹> <逗号分隔指纹表>
+            local want=$1 list=$2 one _old=$IFS
+            IFS=','
+            for one in $list; do [ "$one" = "$want" ] && { IFS=$_old; return 0; }; done
+            IFS=$_old
+            return 1
+          }
+          _covers() { # _covers <条目下标> <命中下标>
+            local i=$1 k=$2
+            [ "${_k_u[$k]}" = 1 ] || return 1
+            [[ ${_k_f[$k]} =~ ${_e_file[$i]} ]] || return 1
+            _hash_in "${_k_h[$k]}" "${_e_hash[$i]}"
+          }
+          _dead=""; _uncovered=""
+          for _i in "${!_e_file[@]}"; do
+            _excl=0
+            for _k in "${!_k_f[@]}"; do
+              _covers "$_i" "$_k" || continue
+              _others=0
+              for _j in "${!_e_file[@]}"; do
+                [ "$_j" = "$_i" ] && continue
+                _covers "$_j" "$_k" && _others=$((_others + 1))
+              done
+              [ "$_others" -eq 0 ] && _excl=$((_excl + 1))
+            done
+            [ "$_excl" -eq 0 ] && _dead="$_dead ${_e_file[$i]}"
+          done
+          # 反向：每处原始命中都必须被至少一条豁免覆盖（否则门不可能是绿的）
+          for _k in "${!_k_f[@]}"; do
+            _cov=0
+            for _j in "${!_e_file[@]}"; do
+              _covers "$_j" "$_k" && _cov=$((_cov + 1))
+            done
+            [ "$_cov" -eq 0 ] && _uncovered="$_uncovered ${_k_f[$k]}:${_k_n[$k]}"
+          done
+          if [ -z "$_dead" ]; then
+            ok "$_n_ent 条豁免逐条都必要（每条都独占覆盖至少一处命中，删掉任何一条门都会转红）"
+          else
+            ng "这些豁免删掉也不会让门变红（覆盖的行被别人全包了 = 死重量）：$_dead"
+          fi
+          if [ -z "$_uncovered" ]; then
+            ok "$_n_raw 处原始命中全部被至少一条豁免覆盖（清单与门一一对得上）"
+          else
+            ng "这些命中没有被任何豁免覆盖，可门却是绿的 —— 清单与实现对不上：$_uncovered"
+          fi
+          # ---- 方向二（逐条不宽）：每个指纹都恰好对应一处出现 ----
+          # 一条锚在整行摘要上的豁免，天然匹配不到内容不同的任何一行；唯一还剩的两条
+          # 放宽路径是"同一份内容在同文件里出现两次"（门会拒绝放行并报 WARN）与"指纹
+          # 已经对不上任何一行"（那是指纹已经失效 = 纯死重量，删掉它对门毫无影响）。
+          # 这一步把两条都钉死：对每个 (条目, 指纹) 组合数一遍该文件里内容完全相同的
+          # 行，必须恰好 1 —— 0 是死重量，>1 是放宽。
+          # 用 _raw 当候选集是充分的：内容相同 ⇒ 命中同一条规则 ⇒ 必然出现在 _raw 里。
+          _wide2=""
+          for _i in "${!_e_file[@]}"; do
+            for _one in $(printf '%s' "${_e_hash[$_i]}" | tr ',' ' '); do
+              _cnt=0
+              for _k in "${!_k_f[@]}"; do
+                [ "${_k_h[$_k]}" = "$_one" ] || continue
+                [[ ${_k_f[$_k]} =~ ${_e_file[$_i]} ]] || continue
+                _cnt=$((_cnt + 1))
+              done
+              [ "$_cnt" -eq 1 ] || _wide2="$_wide2 ${_e_file[$_i]}:${_one}(${_cnt} 处)"
+            done
+          done
+          if [ -z "$_wide2" ]; then
+            ok "每个指纹都恰好对应一处出现（0 处 = 失效的死重量，>1 处 = 豁免放宽，两种都没有）"
+          else
+            ng "这些指纹在本仓库里不是恰好对应一处出现（0 处 = 已失效的死重量，>1 处 = 豁免宽过了）：$_wide2"
+          fi
         fi
       fi
     fi
@@ -853,9 +949,9 @@ else
   else
     _out=$(bash scripts/sanitize.sh 2>/dev/null)
     if printf '%s\n' "$_out" | grep -E "^  $_probe:1 " | grep -qF '私网地址'; then
-      ok "同类别的新私网地址仍然被拦（新行不在任何豁免的行号里）"
+      ok "同类别的新私网地址仍然被拦（新行的内容与清单里任何指纹都对不上）"
     else
-      ng "门放过了一个全新的私网地址 —— 豁免钉的不是行号，是整个文件"
+      ng "门放过了一个全新的私网地址 —— 豁免钉的不是那一行内容，是整个文件"
     fi
     if printf '%s\n' "$_out" | grep -E "^  $_probe:2 " | grep -qF '带用户名的远端目标'; then
       ok "同类别的新登录目标（用户名 + @ + 私网地址）仍然被拦"
@@ -903,6 +999,106 @@ else
     ok "这五行确实由「带用户名的远端目标」这条规则拦下（不是别的规则碰巧兜住）"
   else
     ng "探针的命中里没有「带用户名的远端目标」这条规则 —— 25d 可能在测一个不相干的洞"
+  fi
+
+  # ---- 25e: 锚定必须抗位移 —— 在被豁免的行【上面】插一段，门仍然绿 ----
+  # ⚠ 先把 25d 的探针文件彻底清掉再往下走：它在 git ls-files 里（25d 用 git add -N
+  #   登记的），而它【本来就该被拦】——留着它，25e/25f 每次跑门都会红，红的原因还
+  #   与本条要验的东西无关。gate 是全局的，前一个用例的探针必须先落地。
+  _t25_clean
+  trap _t25_clean EXIT INT TERM
+  # 这条钉的是 2026-10-16 这次改动的全部动机：行号锚定时，任何在豁免行之上的编辑都会
+  # 把门变红（本分支上因为三处互不相关的改动红过三次，每次都要手工重锚，而重锚是
+  # 「悄悄放大覆盖面」的最佳时机）。指纹锚定之后，同样的编辑必须是【无事发生】。
+  # 探针选 docs/OPERATIONS.md：它有 3 条豁免共 9 处被锚定的出现，全在第 13~274 行，
+  # 插在文件最前面会把它们整体下移 1 —— 正是行号方案必然转红的那种编辑。
+  # ⚠ 还原用 cp 而不是 git checkout：测试要跑在带未提交改动的工作区里。
+  _shift_f="docs/OPERATIONS.md"
+  _bak=$(mktemp "${TMPDIR:-/tmp}/pfan-t25e.XXXXXX") || _bak=""
+  _restore_shift() {
+    [ -n "$_bak" ] && [ -s "$_bak" ] && cp "$_bak" "$_shift_f" 2>/dev/null
+    [ -n "$_bak" ] && rm -f "$_bak"
+    return 0
+  }
+  if [ -z "$_bak" ] || ! cp "$_shift_f" "$_bak" 2>/dev/null; then
+    ng "备份 $_shift_f 失败 —— 位移这条断言无效"
+  else
+    trap '_t25_restore; _restore_shift' EXIT INT TERM
+    { printf '%s\n' '<!-- t25 probe: 与脱敏无关的一行插在所有被豁免的行之上 -->'
+      cat "$_shift_f"; } > "${_bak}.new" && cat "${_bak}.new" > "$_shift_f"
+    rm -f "${_bak}.new"
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -q '^  \[ok\]'; then
+      ok "在被豁免的行上面插入一行后门仍然全绿（豁免锚在内容上，不受位移影响）"
+    else
+      ng "插入无关的一行就让门变红 —— 豁免仍然钉着行号，或者指纹对不上："
+      printf '%s\n' "$_out" | grep -E '^  [^ ]+:[0-9]+  \[' | head -5 | sed 's/^/       /'
+    fi
+    _restore_shift
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -q '^  \[ok\]'; then
+      ok "还原后门仍然全绿（探针确实清干净了）"
+    else
+      ng "还原之后门仍然红 —— 25e 的探针没清干净"
+    fi
+    trap _t25_restore EXIT INT TERM
+  fi
+
+  # ---- 25f: 方向二的端到端 —— 在【真的被豁免过的文件里】新写一行同类内容 ----
+  # 25c 用的是 scratch 探针文件，它证明"新文件里的新行会被拦"；这里补上另一半：同一个
+  # 被豁免过的文件里新写的行也必须被拦。否则"豁免锚在某一行上"就是空话 —— 一条
+  # 锚在整行摘要上的豁免不该匹配任何内容不同的行，而内容锚定最容易丢的就是这一半。
+  # 两处探针，都刻意用【不同的值】：同一类别、不同字面量。
+  # ⚠ 探针字符串【拆成碎片再拼】：本测试文件自己也在门的扫描范围内。
+  _probe2_f="docs/OPERATIONS.md"
+  _probe2_g="scripts/deploy.sh"
+  _bak2=$(mktemp "${TMPDIR:-/tmp}/pfan-t25f.XXXXXX") || _bak2=""
+  _bak3=$(mktemp "${TMPDIR:-/tmp}/pfan-t25f.XXXXXX") || _bak3=""
+  _restore2() {
+    [ -n "$_bak2" ] && [ -s "$_bak2" ] && cp "$_bak2" "$_probe2_f" 2>/dev/null
+    [ -n "$_bak3" ] && [ -s "$_bak3" ] && cp "$_bak3" "$_probe2_g" 2>/dev/null
+    [ -n "$_bak2" ] && rm -f "$_bak2"
+    [ -n "$_bak3" ] && rm -f "$_bak3"
+    return 0
+  }
+  if [ -z "$_bak2" ] || [ -z "$_bak3" ] \
+     || ! cp "$_probe2_f" "$_bak2" 2>/dev/null || ! cp "$_probe2_g" "$_bak3" 2>/dev/null; then
+    ng "备份探针目标失败 —— 25f 这条断言无效"
+  else
+    trap '_t25_restore; _restore2' EXIT INT TERM
+    _f_at2='@'
+    _f_user2='probe''user'
+    _f_ip2='10.44.''7.21'
+    _f_ext='203.0.113.''5'
+    printf '# t25f probe: lan %s\n' "$_f_ip2" >> "$_probe2_f"
+    printf '# t25f probe: ssh %s%s%s true\n' "$_f_user2" "$_f_at2" "$_f_ext" >> "$_probe2_g"
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    # 行号用标记去找，【不】用 grep -c . 数：那个数的是非空行，而这两个文件里有空行
+    # （OPERATIONS.md 320 行里只有 247 行非空）—— 数错了行号，断言会去查一个不存在的
+    # 位置，然后报「门放过了」，而其实门没放过。断言指错地方比断言红更坏。
+    _want_f=$(grep -n 't25f probe' "$_probe2_f" 2>/dev/null | tail -1 | cut -d: -f1)
+    _want_g=$(grep -n 't25f probe' "$_probe2_g" 2>/dev/null | tail -1 | cut -d: -f1)
+    if [ -n "$_want_f" ] && printf '%s\n' "$_out" | grep -qF "$_probe2_f:$_want_f "; then
+      ok "在被豁免过的文档里新写的私网地址仍被拦（豁免没有顺着文件放宽）"
+    else
+      ng "门放过了 $_probe2_f:$_want_f 里新写的私网地址 —— 豁免宽到把整个文件放开了"
+      printf '%s\n' "$_out" | grep -E "^  $_probe2_f:" | sed 's/^/       /'
+    fi
+    if [ -n "$_want_g" ] && printf '%s\n' "$_out" | grep -qF "$_probe2_g:$_want_g "; then
+      ok "在被豁免过的脚本里新写的登录目标仍被拦（同上）"
+    else
+      ng "门放过了 $_probe2_g:$_want_g 里新写的登录目标 —— 豁免宽到把整个文件放开了"
+      printf '%s\n' "$_out" | grep -E "^  $_probe2_g:" | sed 's/^/       /'
+    fi
+    _restore2
+    _out=$(bash scripts/sanitize.sh 2>/dev/null)
+    if printf '%s\n' "$_out" | grep -q '^  \[ok\]'; then
+      ok "还原后门仍然全绿（25f 的探针确实清干净了）"
+    else
+      ng "还原之后门仍然红 —— 25f 的探针没清干净"
+      printf '%s\n' "$_out" | grep -E '^  [^ ]+:[0-9]+  \[' | head -5 | sed 's/^/       /'
+    fi
+    trap _t25_restore EXIT INT TERM
   fi
 
   _t25_clean

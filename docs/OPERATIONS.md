@@ -169,10 +169,13 @@ bash scripts/smoke.sh          # 回滚后必须全绿
 
 本仓库**即将公开**。翻转 visibility 之前必须满足：
 
-1. `scripts/sanitize.sh` **已实现且通过**（rc=0，5 条规则 / 26 条豁免），但覆盖面比本条原先列的窄 ——
+1. `scripts/sanitize.sh` **已实现且通过**（rc=0，5 条规则 / 26 条豁免 / 50 处被锚定的出现），
+   但覆盖面比本条原先列的窄 ——
    **token、记忆文档、`audit/`、隧道 UUID 无对应规则**（规则全清单与理由见本节末「发布门的覆盖范围」）。
-2. LAN 地址**未删除、已逐条豁免**（`scripts/sanitize.allow` 第 4 组「私网地址」）：本文档第 17/39/46/220/274 行
-   与 `scripts/smoke.sh:19`（`PFAN_HOST` 缺省值，须与 `deploy.sh:10` 一致）。删不掉，理由见末注。（`192.168.1.0/24`）
+2. LAN 地址**未删除、已逐条豁免**（`scripts/sanitize.allow` 第 4 组「私网地址」）：本文档 4 处，
+   外加 `scripts/smoke.sh` 与 `scripts/deploy.sh` 各 1 处（`PFAN_HOST` 缺省值，两处必须一致）。
+   删不掉，理由见末注。豁免锚在**那一行的内容**上而不是行号上，所以这里刻意不写行号 ——
+   写了就会在下次改这份文档时过期（`bash scripts/sanitize.sh --allow-list` 可以反查当前是哪几行）。
 3. `server/pfanel.py` 的 Origin 白名单已配置化（backlog ②⑤），不再硬编码 IP
    —— **状态：已完成**（`PFAN_ORIGIN_ALLOW` 环境变量可覆盖；
    缺省 `DEFAULT_ORIGINS` 仍含本机 LAN IP，属预期缺省，测试断言缺省=生产值）
@@ -304,8 +307,16 @@ stat -c '%F %a' /dev/pfanctl     # 必须是 character special file 600
 
 `bash scripts/sanitize.sh --list` 是唯一的事实源 —— 它打印的就是扫描时用的那份，
 不是散文。当前编译出 **5 条规则**：私钥路径、macOS 用户目录、自有域名、
-带用户名的远端目标（account + host，含邮箱形态）、私网地址。另有 26 条豁免，
-在 `scripts/sanitize.allow` 里逐条钉死「文件:行号」并写了理由。
+带用户名的远端目标（account + host，含邮箱形态）、私网地址。另有 26 条豁免（共 50 处出现），
+在 `scripts/sanitize.allow` 里逐条钉死「文件 + 那一行内容的 sha256 指纹」并写了理由。
+
+**豁免为什么钉内容而不钉行号**（2026-10-16 改）：行号会被它上面的任何一次编辑挪动，于是
+任何无关的改动都会把门变红 —— 本分支上因为三处互不相关的改动红过三次，每次的修法都是手工
+重锚，而重锚正是「悄悄把覆盖面放大」的时机。指纹认内容：上下移动都不必改清单，而同一文件里
+新写的同类内容仍然照拦（`tests/shell/test_repo_hygiene.sh` 的 T25e/T25f 双向钉住这两头）。
+清单仍然【一份都不少】：26 条全部提交、逐条必要（删掉任何一条门就红）。
+`bash scripts/sanitize.sh --allow-list` 是反向视图，把每条豁免当前放行的 `文件:行号` 逐条印出来，
+改完某一行之后照它重新取指纹即可，不必手工数行。
 
 **门扫不到的**（发布前须人工过一遍）：
 
