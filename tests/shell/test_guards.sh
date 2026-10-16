@@ -148,5 +148,56 @@ else
 fi
 rm -rf "$T6D"
 
+# T6b 钉的是【缺省值】。T6 一次钉住的是机制：会等 / 等不到仍失败 / 正常时不等。
+# 上面 T6 三个子例都【显式传了】PFAN_WAIT_LEVEL0_MAX（那个覆盖项存在的唯一理由就是
+# 让 CI 不用真睡 46s），于是 WAIT_LEVEL0_MAX 的缺省值从来没有被任何断言碰过：
+# 把它改回 25、甚至改到 5，整份测试照样 fails=0（本分支变异实测）——
+# 而出事故的那个数字正是它。2026-10-10：冒烟在一台【正在自愈的健康机器】上报出
+# "level 越界: 0"，根因是 25s 的预算比 30s 的恢复窗口短。
+sec "T6b: level=0 等待预算的【缺省值】必须钉住 —— 25s 预算比实测恢复窗口短，必然误报"
+# 这里断言的是【关系】，不是字面量 45：
+#   缺省预算必须【超过实测恢复窗口 30s】。任何 ≤30 的值都是【已知错值】——
+#   计数器按 2s 步进（scripts/smoke.sh:59-62），25 的预算实际只能等 26s < 30s，
+#   于是每一次正确的恢复都会被报成故障。30 来自 2026-10-10 的实测记录
+#   （level=0 持续 ≥10s，约 30s 才回到正常档，见 scripts/smoke.sh:70-72）。
+#
+# 为什么【不】把 45 钉死：45 是"给 30s 留 50% 余量"的策略选择，不是正确性条件。
+# 钉死它有两个坏处：① 它会禁止一个同样正确、甚至更稳的取值（40 或 50），
+# 正确性收益为零；② 这个字面量自己也会烂 —— 下次重新实测得到 35s 时，
+# 钉 45 的断言会以"守卫坏了"的样子报错，把一次正常的重新标定伪装成回归。
+# 被断言的只有【不会退回已知错值】这一条。
+# 上界只做宽松封顶：deploy.sh 重启完立刻跑冒烟，真故障晚报一会儿是温和的方向
+# （scripts/smoke.sh:73-74 自己就是这么权衡的），但冒烟是冒烟，不该挂上几分钟。
+T6B_FLOOR=30    # 实测恢复窗口（秒），出处见上（与 scripts/smoke.sh:70-72 同一份记录）
+T6B_CEIL=120    # 封顶：超过 ~2min 就不是冒烟了，是脚本卡住
+# 【执行】smoke.sh 里定义 WAIT_LEVEL0_MAX 的那一行，而不是 grep 字面量：
+# 整行原样交给一个【没设 PFAN_WAIT_LEVEL0_MAX】的干净 bash 去 source，读出结果。
+# 于是这一条问的是"不传覆盖时冒烟真的用多少秒"，加引号、改展开写法、后面挂个
+# 注释都不会让它失效 —— 也不会像字面量断言那样在某次重构后静默失去锚点。
+T6BASH=$(command -v bash)
+T6B_N=$(grep -c '^WAIT_LEVEL0_MAX=' scripts/smoke.sh)
+if [ "$T6B_N" -ne 1 ]; then
+  ng "scripts/smoke.sh 里有 $T6B_N 行顶层 WAIT_LEVEL0_MAX= 赋值（期望恰好 1）—— 抽取锚点变了，先修这个再谈钉值"
+else
+  T6BD=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/pfan-t6b.XXXXXX")
+  grep '^WAIT_LEVEL0_MAX=' scripts/smoke.sh > "$T6BD/assign.sh"
+  # set -u：把 ${PFAN_WAIT_LEVEL0_MAX} 写成【没有缺省】的写法会让这里直接报错，
+  # 那正是"缺省值没了"该有的反应（生产里那条赋值会跟着报未定义变量），不许静默通过。
+  T6B_RAW=$(env -u PFAN_WAIT_LEVEL0_MAX "$T6BASH" -c 'set -u; . "$1"; printf %s "$WAIT_LEVEL0_MAX"' \
+              _ "$T6BD/assign.sh" 2>&1); T6B_RC=$?
+  if [ "$T6B_RC" -ne 0 ]; then
+    ng "求 WAIT_LEVEL0_MAX 缺省值时报错: $(printf '%s' "$T6B_RAW" | head -1)"
+  elif ! printf '%s' "$T6B_RAW" | grep -qE '^[0-9]+$'; then
+    ng "缺省预算不是正整数: '${T6B_RAW}' —— 守卫比的是 [ _waited -lt 预算 ]，非数字会让它要么一次都不等、要么每次等满"
+  elif [ "$T6B_RAW" -le "$T6B_FLOOR" ]; then
+    ng "缺省预算 ${T6B_RAW}s ≤ 实测恢复窗口 ${T6B_FLOOR}s —— 这就是「把正在自愈的健康机器报成故障」的形态（25s → 必然误报）"
+  elif [ "$T6B_RAW" -gt "$T6B_CEIL" ]; then
+    ng "缺省预算 ${T6B_RAW}s > 封顶 ${T6B_CEIL}s —— deploy.sh 重启后立刻跑冒烟，等这么久就不是冒烟了"
+  else
+    ok "缺省预算 ${T6B_RAW}s（> 实测恢复 ${T6B_FLOOR}s，≤ 封顶 ${T6B_CEIL}s）：不传覆盖时冒烟等得起一次完整恢复"
+  fi
+  rm -rf "$T6BD"
+fi
+
 printf '\n== test_guards: %s (fails=%d) ==\n' "$([ "$fails" -eq 0 ] && echo PASS || echo FAIL)" "$fails"
 exit "$fails"
