@@ -1027,9 +1027,13 @@ def test_daemon_ready_waits_for_the_fan_to_settle_before_its_first_read():
         "第一读 EC 之前一次都没等 —— 读数比判据早：守护刚 restart、_FSL 还是 0 时，"
         "EC 0x76 报的仍是切换前的转速，读到非零就判成【就绪】。事件=%r" % (events,)
     )
-    assert max(waits) >= pfanel.HANDOVER_SETTLE_S, (
-        "第一读之前最长只等了 %rs，低于 settle 口径 %rs —— 等得不够久等于没等"
-        % (max(waits), pfanel.HANDOVER_SETTLE_S)
+    # R-13：这里原先写的是 `max(waits) >= pfanel.HANDOVER_SETTLE_S` —— 恒真的
+    # 同义反复：waits 记录的就是 time.sleep(settle)，而 settle 的缺省值正是那个
+    # 常量，拿常量与自己比只能蒙对。改成对独立字面下界断言：固件接管不是瞬时的，
+    # 低于 1s 的"等稳"等于没等；上限 5s 是延迟预算。1.6->0.001 的变异因此转红。
+    assert 1.0 <= max(waits) <= 5.0, (
+        "第一读之前最长只等了 %rs，越出 [1.0, 5.0] —— 等得不够久等于没等，"
+        "等太久是纯延迟；事件=%r" % (max(waits), events)
     )
 
 
@@ -1656,7 +1660,302 @@ def test_firmware_curve_handover_waits_before_its_first_ec_read():
         "【切换前】的非零转速，楔住的 EC 会被判成【交回成功】、兜底不写，"
         "而 EC 还停在 s0i3、_FSL 停在 0（= 停转）。事件=%r" % (events,)
     )
-    assert max(waits) >= pfanel.HANDOVER_SETTLE_S, (
-        "第一读之前最长只等了 %rs，低于 settle 口径 %rs —— 等得不够久等于没等"
-        % (max(waits), pfanel.HANDOVER_SETTLE_S)
+    # 同 test_daemon_ready_waits_for_the_fan_to_settle_before_its_first_read（R-13）：
+    # 独立字面下界，不拿常量与自己比；1.6->0.001 的变异在这里同样转红。
+    assert 1.0 <= max(waits) <= 5.0, (
+        "第一读之前最长只等了 %rs，越出 [1.0, 5.0] —— 等得不够久等于没等；"
+        "事件=%r" % (max(waits), events)
+    )
+# ---------------- R-02：free 的起点不许是 _FSL 0（F2 的活体孪生） ----------------
+# 实测（2026-10-17，HEAD）：POST /api/profile {"profile":"free"} 先 stop pfand，
+# 再写 `_FSL 1 0` + EC88 s0i3 就返回 —— s0i3 下 0 就是停转，守护已停、没有任何
+# 后验；唯一的安全网是 82°C 看门狗。quiet/cool/auto/s0i3 全都有交回后置条件，
+# 只有 free 没有，属遗漏。修法与 core/pfand 的 ensure_s0i3（R-01）同一手法：
+# 写【当前档位】（读不到/低于下限退 MIN_SAFE_LEVEL），交回后按 quiet/cool 的
+# 口径等稳、读 EC，为 0/读不到就兜底 —— 两处必须一致。
+
+
+def test_free_curve_starts_from_the_current_level_not_stop():
+    """free 的起点写当前档位（不是 0），EC 未接管时按 quiet/cool 口径兜底。
+
+    两个方向都跑，缺一不可：
+      ① 当前档位 50、EC 正常读回 -> 起点写 50、全程不出现 _FSL 0、无兜底写；
+      ② EC 的 0x79 写被丢弃、读回 0 -> 最后一次 _FSL 写必须是 MIN_SAFE_LEVEL 兜底。
+    只跑 ② 的话，"无条件写兜底"的实现也全绿，那会把每次切 free 都压成 25%；
+    只跑 ① 则本缺陷（留在停转）完全看不见。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    state = os.environ["PFAN_DMESG_STATE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import re as _re
+    import subprocess as _sp
+
+    _real_run, _real_open, _real_acpi = _sp.run, builtins.open, pfanel.acpi
+    _real_ec, _real_time = pfanel.get_ec76, pfanel.time
+
+    class _NoSleep:
+        def sleep(self, _s):
+            return None
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    def _free(keep_level, ec_fn, drop_curve_write):
+        with open(curve_file, "w", encoding="utf-8") as fh:
+            json.dump({"curve": "s0i3", "level": 50}, fh)
+        open(dev, "w").close()
+        open(log, "w").close()
+        _reset_device_requests()
+        # 假设备的"当前档位"：get_level() 读的 _FST 由它回答
+        if keep_level is None:
+            if os.path.exists(state):
+                os.remove(state)
+        else:
+            with open(state, "w", encoding="utf-8") as fh:
+                fh.write(str(keep_level))
+        dropped = []
+
+        def _acpi(path, args=""):
+            # 楔住的 EC：0x79 曲线写既不落到设备也不回 RESULT
+            if drop_curve_write and str(path) == pfanel.EC88 and "0x79" in str(args):
+                dropped.append(args)
+                return None
+            return _real_acpi(path, args)
+
+        _sp.run = _systemctl_stub("inactive", _real_run)
+        pfanel.acpi = _acpi
+        pfanel.get_ec76 = ec_fn
+        pfanel.time = _NoSleep()
+        pfanel.open = lambda p, *a, **k: (
+            _real_open(log, "a")
+            if str(p) == "/var/log/pfanel.log"
+            else _real_open(p, *a, **k)
+        )
+        try:
+            got = pfanel.set_curve("free")
+        finally:
+            _sp.run = _real_run
+            pfanel.open = _real_open
+            pfanel.acpi = _real_acpi
+            pfanel.get_ec76 = _real_ec
+            pfanel.time = _real_time
+        reqs = _device_requests()
+        fsl = [
+            int(m.group(1))
+            for m in (_re.search(r"_FSL 1 (\d+)$", r) for r in reqs)
+            if m
+        ]
+        return got, dropped, fsl, reqs, _real_open(log, encoding="utf-8").read()
+
+    # ① 正常侧
+    got, dropped, fsl, reqs, logtext = _free(50, _real_ec, False)
+    assert not dropped, "正常侧不该丢弃任何 0x79 写"
+    assert got == "free" and pfanel.get_state()["curve"] == "free"
+    assert fsl, "free 切换一个 _FSL 都没写 —— 本用例什么也没验到"
+    assert 0 not in fsl, (
+        "free 交回写了 _FSL 0（= 停转，而守护已停、没有后验）: %r" % (fsl,)
+    )
+    assert fsl[0] == 50, (
+        "free 的起点档位应是【当前档位 50】，实际 %r —— 写死下限会把用户档位压成 25"
+        % (fsl[0],)
+    )
+    i_fsl = next(i for i, r in enumerate(reqs) if r.endswith("_FSL 1 50"))
+    i_ec = next(i for i, r in enumerate(reqs) if "EC88" in r and "0x79" in r)
+    assert i_fsl < i_ec, (
+        "握手形状必须仍是【先 _FSL 写、后 EC88 写】（与 core/pfand 一致）：%r" % (reqs,)
+    )
+    ec_after = pfanel.get_ec76()
+    assert ec_after and ec_after > 0, "free 切换后 EC 读回 %r（0 = 停转）" % (ec_after,)
+    assert "未落到设备" not in logtext and "直接写 _FSL" not in logtext, (
+        "EC 正常读回 50 却仍然兜底写了：%r" % (logtext,)
+    )
+
+    # ② EC 写被吞、读回 0 -> 必须兜底
+    got2, dropped2, fsl2, _reqs2, logtext2 = _free(50, lambda: 0, True)
+    assert dropped2, "0x79 曲线写在注入里没被丢弃 —— 本用例的故障没有真的发生"
+    assert got2 == "free"
+    assert 0 not in fsl2, "兜底路径也不许出现 _FSL 0: %r" % (fsl2,)
+    assert fsl2[-1] == pfanel.MIN_SAFE_LEVEL, (
+        "EC 写被吞、读回 0 时最后一次 _FSL 写是 %r —— free 停在停转上"
+        % (fsl2[-1] if fsl2 else None,)
+    )
+    assert "直接写 _FSL 1 %d" % pfanel.MIN_SAFE_LEVEL in logtext2, (
+        "兜底写必须留日志（事后分得清是没检查还是兜底了）：%r" % (logtext2,)
+    )
+
+
+# ---------------- R-03：s0i3 的 curve.state 必须在 restart 之前落盘 ----------------
+# pfand 启动时读 curve.state，不是 s0i3 就 log + exit 0（设计）。旧顺序
+# （先 restart 后 save_state）让守护读到旧曲线退出，新门禁于是把它当成"没起来"
+# 回滚到 cool，而回滚把 cool 持久化 —— s0i3 永久不可达，每次尝试还伴随 5-9s 的
+# 命令性停转。修复是重启前先 save_state；失败路径由回滚自己改回 cool。
+
+
+def test_s0i3_persists_the_curve_before_restarting_the_daemon():
+    """restart 发生的那一刻，curve.state 必须已经是 s0i3。
+
+    判据取【restart 瞬间的状态】，不是事后的状态：事后 s0i3 也能由失败回滚的
+    反向覆盖蒙对"最后是 cool"，而这里要钉的正是顺序。
+    第二个方向：真死守护仍必须回滚到 cool 并持久化 cool（回归保护）。
+    """
+    dev = os.environ["PFAN_DEV"]
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    import subprocess as _sp
+
+    _real_run, _real_open = _sp.run, builtins.open
+    _real_ready = getattr(pfanel, "_daemon_ready", None)
+    _real_time = pfanel.time
+
+    class _NoSleep:
+        def sleep(self, _s):
+            return None
+
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+    def _run(ready):
+        with open(curve_file, "w", encoding="utf-8") as fh:
+            json.dump({"curve": "cool", "level": 40}, fh)
+        open(log, "w").close()
+        seen = []
+
+        def _fake_run(cmd, *a, **k):
+            if isinstance(cmd, (list, tuple)) and any(
+                "systemctl" in str(c) for c in cmd
+            ):
+                if "restart" in cmd:
+                    # 真 pfand 在启动时读这个文件；记录它当时会读到什么
+                    seen.append(pfanel.get_state()["curve"])
+                return _Proc("active\n" if ready else "inactive\n", 0 if ready else 3)
+            return _real_run(cmd, *a, **k)
+
+        _sp.run = _fake_run
+        pfanel._daemon_ready = lambda *a, **k: ready
+        pfanel.time = _NoSleep()
+        pfanel.open = lambda p, *a, **k: (
+            _real_open(log, "a")
+            if str(p) == "/var/log/pfanel.log"
+            else _real_open(p, *a, **k)
+        )
+        try:
+            got = pfanel.set_curve("s0i3")
+        finally:
+            _sp.run = _real_run
+            pfanel.open = _real_open
+            pfanel.time = _real_time
+            if _real_ready is None:
+                pfanel.__dict__.pop("_daemon_ready", None)
+            else:
+                pfanel._daemon_ready = _real_ready
+        return got, seen
+
+    got, seen = _run(True)
+    assert seen, "本用例没有观察到 restart —— 注入没有生效"
+    assert got == "s0i3", "预持久化后健康切换仍被回滚：%r" % (got,)
+    assert seen[0] == "s0i3", (
+        "restart 发生时 curve.state 是 %r，不是 s0i3 —— pfand 会读到旧曲线直接"
+        "exit 0，门禁回滚 cool 并持久化，s0i3 从此不可达" % (seen[0],)
+    )
+    assert pfanel.get_state()["curve"] == "s0i3"
+
+    got2, seen2 = _run(False)
+    assert seen2 and seen2[0] == "s0i3", (
+        "失败路径也必须先落盘（否则重试永远从旧状态出发）：%r" % (seen2,)
+    )
+    assert got2 == "cool", "真死守护必须仍回滚到 cool：%r" % (got2,)
+    assert pfanel.get_state()["curve"] == "cool", (
+        "回滚必须把 cool 持久化，不能把预写入的 s0i3 留下：%r"
+        % (pfanel.get_state()["curve"],)
+    )
+
+
+# ---------------- R-04 + R-13：guard() 的行为与两个常量 ----------------
+# 变异实测（本分支 43609b9 上）：删掉 guard() 里的 set_curve("auto")、把
+# GUARD_TEMP 82->100、HANDOVER_SETTLE_S 1.6->0.001 —— pytest 70/70 全绿。
+# guard 的动作是 free/quiet/s0i3 停转的唯一自动恢复，没有任何行为测试。
+# 判据必须钉【动作】（stub 记录 set_curve 被调），日志不算：只删调用、留下
+# "已自动回退"日志的版本照样全绿，而那条日志是一条没人能核对的谎。
+
+
+def test_guard_rolls_back_at_the_threshold_and_only_for_guarded_curves():
+    """受管曲线 >= GUARD_TEMP 才回退；阈值用字面温度双向夹住；两个常量对独立下界。
+
+    ① 行为：GUARDED 每一条在 90.0C 恰好调一次 set_curve("auto")；81.9C（低于阈值）
+       不调；恰好 GUARD_TEMP 调（>= 语义）；auto/cool 在 95.0C 不调；温度 None 不调。
+    ② 阈值本身：90.0 与 81.9 是【字面温度】—— GUARD_TEMP 改成 100 或 70 都会让
+       其中一条转红，不依赖常量自己比自己。
+    ③ GUARD_TEMP 与 HANDOVER_SETTLE_S 对独立字面边界断言（旧的两条
+       `max(waits) >= pfanel.HANDOVER_SETTLE_S` 是恒真的同义反复）。
+    """
+    dev = os.environ["PFAN_DEV"]
+    log = os.path.join(os.path.dirname(dev), "pfanel.log")
+    _real_open = builtins.open
+
+    _had_open = hasattr(pfanel, "open")
+
+    def _probe(curve, temp):
+        calls = []
+        temps = []
+        # 用 getattr：本文件其它用例把 pfanel.open 留在模块上，但单独跑本用例时
+        # 它并不存在 —— 直接取 pfanel.open 会在 -k 单跑时 AttributeError（本文件
+        # 自己就踩过一次），那是测试互染，不是被测行为。
+        real = (pfanel.get_curve, pfanel.get_temp, pfanel.set_curve, pfanel.log_event,
+                getattr(pfanel, "open", builtins.open))
+        pfanel.get_curve = lambda: curve
+        pfanel.get_temp = lambda: (temps.append(temp), temp)[1]
+        pfanel.set_curve = lambda name: calls.append(name)
+        pfanel.log_event = lambda *a, **k: None
+        pfanel.open = lambda p, *a, **k: (
+            _real_open(log, "a")
+            if str(p) == "/var/log/pfanel.log"
+            else _real_open(p, *a, **k)
+        )
+        try:
+            got = pfanel.guard()
+        finally:
+            (pfanel.get_curve, pfanel.get_temp, pfanel.set_curve, pfanel.log_event,
+             _ret) = real
+            if _had_open:
+                pfanel.open = _ret
+            else:
+                pfanel.__dict__.pop("open", None)
+        return got, calls, temps
+
+    open(log, "w").close()
+
+    for curve in pfanel.GUARDED:
+        got, calls, _t = _probe(curve, 90.0)
+        assert calls == ["auto"], (
+            "受管曲线 %s 在 90.0C 没有回退（动作被删/阈值被改）：calls=%r" % (curve, calls)
+        )
+        assert got == 90.0, "guard 触发时应返回触发温度：%r" % (got,)
+
+    _got, calls, _t = _probe("quiet", 81.9)
+    assert calls == [], "81.9C（低于 GUARD_TEMP）触发了回退：calls=%r" % (calls,)
+
+    _got, calls, _t = _probe("quiet", float(pfanel.GUARD_TEMP))
+    assert calls == ["auto"], "恰好 GUARD_TEMP 时必须触发（>= 语义）：calls=%r" % (calls,)
+
+    for curve in ("auto", "cool"):
+        _got, calls, _t = _probe(curve, 95.0)
+        assert calls == [], "不受管曲线 %s 被 guard 回退了：calls=%r" % (curve, calls)
+
+    _got, calls, temps = _probe("quiet", None)
+    assert calls == [], "温度读不到（None）时不该回退：calls=%r" % (calls,)
+    assert temps, "guard 在受管曲线上必须先读温度（None 分支被跳过？）"
+
+    # 常量：独立字面边界 + 出处。TjMax=100（见 GUARD_TEMP 注释）；
+    # 阈值必须在它之下留出余量，70..95 是收窄后的合法带。
+    assert 70 <= pfanel.GUARD_TEMP <= 95, (
+        "GUARD_TEMP=%r 越出 [70,95] —— 到 100 等于永不触发（TjMax 本身）；"
+        "低于 70 会在正常办公温度就回退" % (pfanel.GUARD_TEMP,)
+    )
+    # 交回后读 EC 的等稳时间：固件接管不是瞬时的（1.0s 下界）；
+    # 5.0s 上界是延迟预算 —— 0.001 这类值实测蒙过整个套件。
+    assert 1.0 <= pfanel.HANDOVER_SETTLE_S <= 5.0, (
+        "HANDOVER_SETTLE_S=%r 越出 [1.0,5.0] —— 等得不够久等于没等" % (
+            pfanel.HANDOVER_SETTLE_S,
+        )
     )

@@ -239,10 +239,25 @@ def set_curve(name):
                 )
         subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
     elif name == "free":
-        # 自由模式：s0i3（让 EC 跟随设定值）+ 停守护，档位由用户面板直接控制
+        # 自由模式：s0i3（让 EC 跟随设定值）+ 停守护，档位由用户面板直接控制。
+        # 【2026-10-17 修】起点写【当前档位】而不是 _FSL 1 0：_FSL 0 在 s0i3 下
+        # 就是停转，而本分支一停守护就没人再把档位拉回来（F2 的活体孪生）。
+        # 与 core/pfand 的 ensure_s0i3 同一手法：读不到/低于下限一律退到
+        # MIN_SAFE_LEVEL —— 两处必须一致，否则就是同一个数出现两份事实源。
+        keep = get_level()
+        if keep is None or keep < MIN_SAFE_LEVEL:
+            keep = MIN_SAFE_LEVEL
         subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
-        acpi(FSL, "1 0")
+        acpi(FSL, "1 %d" % keep)
         acpi(EC88, "4 181 0x79 0x%02X 0" % CURVES["s0i3"])
+        # 交回后置条件，与 quiet/cool 同一口径（等稳 → 读 EC 0x76 → 为 0 或
+        # 读不到就兜底 MIN_SAFE_LEVEL）。free 的 EC 语义就是 s0i3：EC 跟随
+        # _FSL，上面那次写没落进 EC 时风扇同样会停，而 free 在 GUARDED 里
+        # 只能靠 82°C 兜底 —— 不能把"已经停下"留给看门狗去发现。
+        time.sleep(HANDOVER_SETTLE_S)
+        ec = get_ec76()
+        if not ec:
+            _force_min_safe_level("free: 档位未落到设备(EC=%s)" % (ec,))
     elif name == "s0i3":
         # s0i3 = 曲线本体模式：释放设定值让 EC 完全跟随，然后由 pfand 施加自定义曲线。
         # 必须【启动】守护 —— pfand 自己会 ensure_s0i3() 并按温度调档。
@@ -252,6 +267,12 @@ def set_curve(name):
         # 节点缺失、配置自检 fail-safe 直接 exit）时照样返回 ok 并持久化 s0i3 ——
         # 之后每次 pfanel 重启（含每次 deploy.sh）都重放同一个坏状态。
         # 这两步刚把 _FSL 留在 0 上，守护不来就等于把风扇停在 0，所以必须验。
+        # 预持久化必须在 restart 【之前】（2026-10-17）：pfand 启动时读
+        # curve.state，读到的不是 s0i3 就直接 exit 0 —— 旧顺序（先重启后
+        # save_state）让守护读到旧曲线，新门禁把它当成"没起来"回滚到 cool，
+        # 而回滚又把 cool 持久化，s0i3 从此永久不可达（每次尝试还伴随
+        # 5-9s 命令性停转）。失败路径由回滚的 set_curve("cool") 自己改回 cool。
+        save_state(curve=name)
         subprocess.run(["systemctl", "restart", "pfand"], capture_output=True)
         if not _daemon_ready():
             # ① 救风扇优先：回滚本身【不许】成为那条会失败的路径。
@@ -274,8 +295,9 @@ def set_curve(name):
                     )
             except OSError:
                 pass
-            # 提前 return：不落到下面那行 save_state(curve=name)，
-            # 坏状态才不会被写进 curve.state。
+            # 提前 return：上面预持久化过 s0i3，而回滚已经把 curve.state 写回
+            # cool —— 不许再落到下面那行 save_state(curve=name)，否则 cool 又
+            # 被覆盖成 s0i3，"s0i3 不可达"的回归就原样复活。
             return rolled
     else:
         # quiet / cool：固件自己的曲线接管，必须停守护
