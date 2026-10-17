@@ -238,8 +238,23 @@ if [ "$_cfg_bad" = "1" ]; then
 fi
 
 ensure_s0i3(){
+    # 握手前要有一次 _FSL 写。旧实现写 0，于是每次启动都先把风扇停掉，
+    # 直到这次写和随后的 EC 写做完才恢复 -- 实测至少两段 0.3s 的窗口。
+    # 改成写【此刻已经在 force 的档位】：握手的形状一个字没改（仍是
+    # _FSL 写 + EC88 写），但风扇全程没有停过。
+    #
+    # 读不到就退到 L0。绝不能退到 0：下面那次启动对齐会把 want_for(T) 写下去，
+    # 读不到时退到 L0 —— 绝不能退到 0。
+    # 注意 getL 自己拿 flock -x 9，所以必须在进入下面那段 flock 之前调用，
+    # 否则自己等自己。
+    local keep
+    keep=$(getL)
+    case "$keep" in
+        "" | *[!0-9]*) keep=${L0:-25} ;;
+    esac
+    [ "$keep" -lt 25 ] && keep=${L0:-25}
     flock -x 9
-    echo "$F._FSL 1 0" > "$DEV" 2>/dev/null; sleep 0.3
+    echo "$F._FSL 1 $keep" > "$DEV" 2>/dev/null; sleep 0.3
     echo "$EC.EC88 4 181 0x79 0x02 0" > "$DEV" 2>/dev/null
     flock -u 9
     sleep 0.3

@@ -74,9 +74,13 @@ PIDD=$!
   # 轮询而不是固定 sleep 5：守护启动要走平台探测 + ensure_s0i3（含 sleep 0.3），
   # 机器负载高时（deploy 同时在跑 ci + ssh）5 秒不够，断言就落在握手中途 —— 读到
   # dl 里只有 EC88 + 两次 _FST，报成「没有 _FSL 写入」（2026-10-10 实测踩到）。
+  # 等待条件必须是【期望的那次对齐写】(30) 而不是"任何 _FSL 写"：keep-level 握手
+  # 在 EC88 之前会先写一次当前档位（R-01，可能是 100 这类残留值），拿"任何写"当
+  # 到达信号会在握手刚完成、对齐写还没落盘的瞬间取样，把 25 这类握手值报成
+  # "写入了但档位不符"。断言本身一字未改（30 / 写错档 / 没有写），只是等待点后移。
   _w=0
   while [ "$_w" -lt 25 ]; do
-    grep -q '_FSL 1 ' "$T/dl" 2>/dev/null && break
+    grep -q '_FSL 1 30' "$T/dl" 2>/dev/null && break
     grep -q '平台配置不可用' "$T/pfand.log" 2>/dev/null && break
     sleep 1; _w=$((_w + 1))
   done
@@ -242,23 +246,33 @@ startd 20
 # 窗口必须覆盖【冷启动耗时 + 一个 IV】：守护启动要跑平台探测、一次 getL（多次子进程）
 # 才走到启动写，之后第一个循环周期还要 sleep IV=2。早先这里只等 3s，落在这个耗时的
 # 边界上（I8 的语义不是"3 秒内"，见下）。
+#
+# 取样点必须让 s0i3 握手先走完：ensure_s0i3 的形状是【先一次 _FSL 写，再 EC88 写
+# (0x79 0x02)】，启动对齐的 100% 写在 EC88 之后；而 keep-level 握手（R-01）在 EC88
+# 之前写的是【当前档位】（可能恰好是残留的 100，也可能是 25 —— 实测两种都出现过）。
+# 那句"首个非零写必须是 100"因此会拿握手写当答案：keep=100 时靠运气蒙对，
+# keep=25 时误报 I8。判据改成"握手尾部（EC88 0x02 写）之后的第一条 _FSL 写"——
+# 它才是启动对齐写，且不受握手写取值影响。
 first=""; sample_at=""
-for i in $(seq 1 32); do          # 32 × 0.25s = 8s ≫ 启动 + IV
+for i in $(seq 1 48); do          # 48 × 0.25s = 12s ≫ 启动 + IV（握手里的 getL 在冷启动下最多烧 2.4s）
   sleep 0.25
-  first=$(grep '_FSL 1 ' "$T/dl" 2>/dev/null | grep -v '_FSL 1 0' | head -1)
-  if [ -n "$first" ]; then sample_at=$((i * 250))ms; break; fi
+  _ec=$(grep -n 'EC88 4 181 0x79 0x02' "$T/dl" 2>/dev/null | head -1 | cut -d: -f1)
+  if [ -n "$_ec" ]; then
+    first=$(tail -n +"$((_ec + 1))" "$T/dl" 2>/dev/null | grep '_FSL 1 ' | head -1)
+    if [ -n "$first" ]; then sample_at=$((i * 250))ms; break; fi
+  fi
 done
 # I8 真正要守的三条（缺一不可）：
 #  1) 冷启动分支确实走到了（否则测的是 ⑬ 恢复锁或曲线对齐的副作用）
 #  2) 启动期间【从未】写出 70 —— apply() 的 CAP 钳制一旦生效，风扇就在 70% 停到
 #     第一个 IV 之后的应急分支，CPU 已 ≥80C 时这是真实过热窗口
-#  3) 首个非零写入就是 100
+#  3) 握手后的启动对齐写就是 100（不是被 CAP 钳下来的 70）
 if [ -z "$first" ]; then
-  ng "8s 内没有任何档位写入 (dl=$(tail -3 "$T/dl" 2>/dev/null | tr '\n' '|') log=$(tail -3 "$T/pfand.log" 2>/dev/null | tr '\n' '|'))"
+  ng "8s 内没等到握手后的启动对齐写 (dl=$(tail -3 "$T/dl" 2>/dev/null | tr '\n' '|') log=$(tail -3 "$T/pfand.log" 2>/dev/null | tr '\n' '|'))"
 elif echo "$first" | grep -q '_FSL 1 100'; then
-  ok "冷启动 85C 首个非零档位写入即 100%（${sample_at}）: $first"
+  ok "冷启动 85C 握手后的首个档位写入即 100%（${sample_at}）: $first"
 else
-  ng "首写不是 100% 而是 $first（apply 把 want_for(85)=100 钳到 CAP=70 —— I8）"
+  ng "握手后首写不是 100% 而是 $first（apply 把 want_for(85)=100 钳到 CAP=70 —— I8）"
 fi
 if grep -q '启动时 T=85C >= EMERG' "$T/pfand.log" 2>/dev/null; then
   ok "走了冷启动过热分支（不是靠 ⑬ 恢复锁兜底）"
@@ -322,5 +336,60 @@ else
 fi
 stop
 fi   # end T12 non-root guard
+
+echo "== T13: 正常启动全程绝不写 _FSL 1 0（R-01 keep-level 握手）=="
+# 设备补丁 36afcf02 把 ensure_s0i3 的握手写从 0 改成【当前档位】：写 0 意味着每次
+# pfand 启动先把风扇停 0.6-3s（两段 sleep 0.3 + getL 的等待）。这条守卫钉住那个
+# 行为：正常启动（55C，非应急）期间设备上不许出现任何一次 _FSL 1 0，且握手的
+# 第一条 _FSL 写必须是 >= 25 的档位。
+#
+# ⚠ 判据不能只查 dl（变异实测：把 keep 改回 0 后 dl 判据全绿）：假 dmesg 只在
+# 【被调用时】把设备当前内容记进 dl，而握手的 _FSL 写与 EC88 写之间没有任何人
+# 调用它 —— EC88 写把 _FSL 写覆盖掉，0 从未进 dl。"日志/流水里没有"于是成了
+# 一句无法证伪的话。用一个独立采样器按 20ms 读设备文件：每次写入至少停留
+# sleep 0.3 才被下一次覆盖，必中；判据这才真的建在【设备上出现过什么】上面。
+stop; sleep 1
+: > "$T/dl"; rm -f "$T/st" "$T/dl.cnt"; : > "$T/dev"
+echo 55000 > "$T/temp"; echo 0 > "$T/emerg"
+: > "$T/samples"; touch "$T/t13-on"
+(
+  while [ -e "$T/t13-on" ]; do
+    d=$(tail -1 "$T/dev" 2>/dev/null)
+    [ -n "$d" ] && echo "$d" >> "$T/samples"
+    sleep 0.02
+  done
+) &
+_SAMP=$!
+startd 40
+hit13=0
+for i in $(seq 1 64); do         # 16s ≫ 启动 + 冷启动 getL（最多 2.4s）+ 对齐写（负载下实测 ~7s）
+  sleep 0.25
+  grep -q '_FSL 1 30' "$T/dl" 2>/dev/null && { hit13=1; break; }
+done
+sleep 0.2                        # 让采样器把最后一个设备状态也记下来
+rm -f "$T/t13-on"; wait "$_SAMP" 2>/dev/null
+if [ "$hit13" = 1 ]; then
+  ok "正常启动写出对齐档位 30（want_for(55)=L1=30）"
+else
+  ng "正常启动没写出 30 (dl=$(tail -3 "$T/dl" 2>/dev/null | tr '\n' '|') log=$(tail -3 "$T/pfand.log" 2>/dev/null | tr '\n' '|'))"
+fi
+# 采样器必须真的看到过写入，否则"没有 0"是空过（与 dl 判据同一个坑）
+if grep -q '_FSL 1 ' "$T/samples" 2>/dev/null; then
+  ok "采样器捕获到 _FSL 写入（判据不空）"
+else
+  ng "采样器整个启动窗口没看到任何 _FSL 写入 —— 采样器失效或启动没发生"
+fi
+if grep -qE '_FSL 1 0($|[^0-9])' "$T/samples" 2>/dev/null; then
+  ng "启动期间设备上出现过 _FSL 1 0 —— 握手把风扇停了: $(grep '_FSL 1 ' "$T/samples" | sort -u | tr '\n' '|')"
+else
+  ok "启动全程设备上从未出现 _FSL 1 0（keep 握手不停转）"
+fi
+_keep13=$(grep '_FSL 1 ' "$T/samples" 2>/dev/null | head -1 | grep -oE '_FSL 1 [0-9]+$' | awk '{print $3}')
+if [ -n "${_keep13:-}" ] && [ "$_keep13" -ge 25 ] 2>/dev/null; then
+  ok "握手首个 _FSL 写是 >= 25 的档位: $_keep13"
+else
+  ng "握手首个 _FSL 写缺失或低于 25 下限: '${_keep13:-<无>}'（samples=$(sort -u "$T/samples" 2>/dev/null | tr '\n' '|')）"
+fi
+stop
 
 echo "test_pfand_loop: fails=$fails"; exit "$fails"

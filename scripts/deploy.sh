@@ -247,7 +247,8 @@ echo "== 4/5 重启服务 =="
 R "sudo -n systemctl restart pfanel && sleep 2 && sudo -n systemctl restart pfand"
 
 # 等待控制回路真正接管，而不是拍脑袋 sleep：
-#   - pfand 启动时 ensure_s0i3() 会短暂写 _FSL 1 0，第一轮才设真实档位
+#   - pfand 启动时的 s0i3 握手（R-01 起为 keep-level，不再写 _FSL 1 0）走完后，
+#     第一轮才把真实档位交上去；旧部署件仍可能短暂写 0
 #   - pfanel 的 snapshot 有缓存，重启瞬间会拿到重启前的读数
 # 两个都会让紧接着的 smoke 读到 level=0 而误判。等 API 报出 level>=1 且 pfand active。
 echo "== 4b/5 等待控制回路接管（最多 30s）=="

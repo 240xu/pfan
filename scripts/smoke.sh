@@ -61,13 +61,18 @@ printf '\n=== 2. API 形状（LAN）===\n'
 # tests/shell/test_guards.sh 用它跑"永远为 0 仍然失败"，否则那一条要在 CI 里真睡 46 秒。
 WAIT_LEVEL0_MAX="${PFAN_WAIT_LEVEL0_MAX:-45}"
 
-# ⚠ 先等守护写出第一个档位再断言：pfand 每次启动都会先 ensure_s0i3()，而那一步
-# 会写 _FSL 1 0（s0i3 的握手序列，固件在此期间不转），随后才写真正的档位。
-# deploy.sh 刚重启过 pfand/pfanel 时立刻跑 smoke 就会正好采到 level=0，误报成
-# "风扇停转 + API 字段缺失"（2026-10-10 实测踩到）。
+# ⚠ 先等守护写出第一个档位再断言：deploy.sh 刚重启过 pfand/pfanel 时立刻跑 smoke
+# 可能采到 level=0，误报成 "风扇停转 + API 字段缺失"（2026-10-10 实测踩到）。
+# level=0 的来源是 pfanel 的 snapshot 缓存 —— 它带 age（线上实测 age≈7s），
+# 重启瞬间还能报出重启前的旧值（deploy.sh 那句"pfanel 的 snapshot 有缓存"就是这个）。
+# 【2026-10-17 更正】这一段原本还写着"pfand 每次启动都会先 ensure_s0i3 写 _FSL 1 0
+# （s0i3 握手序列），随后才写真正的档位"——那是旧守护的行为。keep-level 握手
+# （R-01，设备件 36afcf02 已上游）写的是当前档位（>=25），正常启动全程不再出现 0。
+# 等待守卫保留：重启窗口里旧快照仍可能报 0；设备上若又跑起旧版 pfand，0 也会
+# 真的回来 —— 那正是 §4b 要比对 pfand sha 的原因。
 #
-# 窗口有多长：要吸收的不只是握手那一段，还有 pfanel 的 snapshot 缓存 —— 它带 age
-# （线上实测 age≈7s），重启瞬间还能报出重启前的 level=0（deploy.sh 那句"pfanel 的
+# 窗口有多长：要吸收的是 pfanel 的 snapshot 缓存 —— 它带 age
+# （线上实测 age≈7s），重启瞬间还能报出重启前的旧值（deploy.sh 那句"pfanel 的
 # snapshot 有缓存"就是这个）。2026-10-10 重启 pfanel 实测：level=0 持续 ≥10s，
 # 约 30s 才回到正常档位 —— 比原来 25s 的预算还长，于是守卫把自己护的东西报成了故障。
 # 上界取 45s 是给这个 30s 留 50% 余量。两边错的方向不对称：上界偏小会把一台正在
@@ -103,7 +108,7 @@ while :; do
 done
 [ -n "$j" ] || bad "LAN $API/api/now 不可达"
 if [ "$_waited" -gt 0 ]; then
-  echo "    （等了 ${_waited}s 让 pfand 走出 s0i3 握手窗口 —— level=0 在守护刚启动时是预期的，不是停转）"
+  echo "    （等了 ${_waited}s 让 pfanel/pfand 的重启窗口过去 —— 刚重启时 level=0 可能来自旧快照缓存，不是停转）"
 fi
 if [ -n "$j" ]; then
   if echo "$j" | jq -e '(.ts|type=="number") and ((.temp == null) or (.temp|type=="number"))
@@ -184,6 +189,25 @@ if remote 'sudo -n sha256sum /etc/pfand.conf' > "$CACHE/live.sha" 2>/dev/null &&
   fi
 else
   bad "读目标机 /etc/pfand.conf 失败"
+fi
+
+printf '\n=== 4b. pfand 部署件与仓库一致（防 deploy 静默回退设备件）===\n'
+# 设备曾长期跑一份【不在任何提交里】的 keep-level ensure_s0i3（36afcf02）：
+# 仓库旧版每次启动先写 _FSL 1 0 把风扇停 0.6-3s，而 deploy.sh 会把这个安全修复
+# 静默换回去。补丁现已上游（core/pfand 与设备件逐字节一致），所以这条比对一旦
+# 报红就意味着【设备与仓库分叉】—— 先上游再部署，禁止直接 deploy 覆盖。
+# 只读：两处 sha256sum（与 §9 的 pfanctl.c 同形）。
+PFAND_REPO_SHA=$(sha256sum core/pfand 2>/dev/null | awk '{print $1}')
+PFAND_LIVE_SHA=$(remote 'sudo -n sha256sum /usr/local/bin/pfand 2>/dev/null' | awk '{print $1}')
+[ -n "$PFAND_LIVE_SHA" ] || PFAND_LIVE_SHA=$(remote 'sha256sum /usr/local/bin/pfand 2>/dev/null' | awk '{print $1}')
+if [ -z "$PFAND_REPO_SHA" ]; then
+  bad "仓库缺 core/pfand"
+elif [ -z "$PFAND_LIVE_SHA" ]; then
+  bad "设备 /usr/local/bin/pfand 读不到（未部署？sudo 不可用？）"
+elif [ "$PFAND_REPO_SHA" != "$PFAND_LIVE_SHA" ]; then
+  bad "pfand 部署件与仓库分叉: repo=$PFAND_REPO_SHA live=$PFAND_LIVE_SHA（设备跑着版本外的守护；先上游再部署，否则 deploy 会静默回退）"
+else
+  ok "pfand 部署件与仓库一致 ($PFAND_REPO_SHA)"
 fi
 
 printf '\n=== 5. 面板部署件与仓库一致，且无硬编码密钥 ===\n'
