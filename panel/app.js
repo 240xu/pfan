@@ -31,6 +31,11 @@ let lastSnap=null;
 // 默认回退 DEFAULT_STALE_AGE —— /api/curve 还没回来前按旧口径判。
 let STALE_AGE=DEFAULT_STALE_AGE;
 function why(e){ return (e&&e.message)||String(e); }
+// R-09：动作失败是【粘性】的 —— 只有下一个动作开始才清除。旧行为里下一次成功的
+// 8s 轮询用 setConn(null) 把「切换曲线失败」抹掉，失败在 ≤8s 后看起来像成功
+// （2026-10-17 实测：+0.4s 红 → +9.4s 绿「实时」，而编辑器根本没打开）。
+// 只服务 #conn-st 通道的五个动作；saveParams 的失败走编辑器自己的 #ed-msg，与此无关。
+let actErr=null;
 function setConn(err){
   const e=document.getElementById("conn-st"); if(!e) return;
   const t=statusText(lastSnap,STALE_AGE,err);
@@ -41,13 +46,13 @@ function setConn(err){
 function applyIV(iv){
   const n=staleAgeLimit(iv);
   if(n===STALE_AGE) return;
-  STALE_AGE=n; setConn(null);   // 阈值变了，立刻按新阈值重画状态条
+  STALE_AGE=n; setConn(actErr);   // 阈值变了，立刻按新阈值重画状态条（不吞粘性动作错误）
 }
 async function pollNow(){
   try{
     lastSnap=await j(API+"/api/now");
     paint(lastSnap);
-    setConn(null);
+    setConn(actErr);   // R-09：轮询成功【不】清除动作失败；有未清除的 actErr 就继续显示
   }catch(e){ setConn(e&&e.message||String(e)); }
 }
 
@@ -68,7 +73,9 @@ function paintGauge(arcId, valId, v, min, max, unit, cls) {
 
 function paint(d){
   cur=d.level; curLevel=d.level;
-  paintGauge("c-temp-arc","c-temp",d.temp,0,105,"°C","classTemp");
+  // R-05：这里曾传字面量 "classTemp" → 与 paintGauge 里 `cls === "temp"` 的分支
+  // 永不匹配，全部走 levelClass，"temp" 分支恒死：79–85.9°C（82°C 看门狗区）画成琥珀而非红。传 "temp"。
+  paintGauge("c-temp-arc","c-temp",d.temp,0,105,"°C","temp");
   paintGauge("c-lvl-arc","c-lvl",d.level,0,120,"%","level");
   document.getElementById("c-ec").innerHTML=(d.ec76==null?"--":d.ec76)+'<span class="u">%</span>';
   document.getElementById("c-rpm").innerHTML=(d.rpm==null?"--":d.rpm)+'<span class="u">rpm</span>';
@@ -121,11 +128,16 @@ function paint(d){
           }).join("")
         +'</tbody></table>';
     }
+    // R-07b：标签行的字段在 window.CURVE.params 里 —— window.CURVE 是 curve_view
+    // （{params,bands,curve}），旧的 c.HYST 一直是 undefined：健康机器上每次 8s 轮询
+    // 都会把「迟滞 undefined°C … undefineds」写进屏幕（2026-10-18 实机只读复核），
+    // /api/curve 失败时同样。改读 params，?? '-' 只兜真正的缺数据。
+    const cp=(window.CURVE&&window.CURVE.params)||{};
     note.innerHTML='<b style="color:#3fb950">自定义曲线生效中</b> —— s0i3 已让固件退出热保护，'+
       'EC 完全跟随 pfand 的设定值。'+tb+
-      '<br><span class="tag g">迟滞 '+c.HYST+'°C 防抖</span>'+
-      '<span class="tag">应急 '+c.EMERG+'°C 满速，'+c.EMERG_REL+'°C 才解除（锁定防抖）</span>'+
-      '<span class="tag">采样 '+c.IV+'s</span>'+
+      '<br><span class="tag g">迟滞 '+(cp.HYST??'-')+'°C 防抖</span>'+
+      '<span class="tag">应急 '+(cp.EMERG??'-')+'°C 满速，'+(cp.EMERG_REL??'-')+'°C 才解除（锁定防抖）</span>'+
+      '<span class="tag">采样 '+(cp.IV??'-')+'s</span>'+
       '<br><b>本机余量</b>：实测全核负载下 25% 最低档也仅 68°C → 应急线 80°C 很难触及。';
   } else if(cv==="free"){
     note.innerHTML='<b style="color:#d29922">自由模式</b> —— 曲线守护已暂停，'+
@@ -155,15 +167,19 @@ let MODE="daemon";
 let GUARD_TEMP=82;
 // ⑰ 写路径：这些是用户点下去在等结果的动作，失败必须给可见反馈（复用 #conn-st 状态条）。
 // 旧实现全是裸 await —— 网络抖一下按钮"点了没反应"，用户无从判断是没生效还是没发出去。
+// R-09：失败还必须是【粘性】的（actErr）—— 每个动作开始时清除旧错误并立即反映到状态条，
+// 失败则写回 actErr；pollNow 成功只重画、不清除，错误至少留到下一个动作。
 async function setCurve(n){
   try{
+    actErr=null; setConn(null);
     const d=await j(API+"/api/profile",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({profile:n})});
     paint(d);
-  }catch(e){ setConn("切换曲线失败: "+why(e)); }
+  }catch(e){ actErr="切换曲线失败: "+why(e); setConn(actErr); }
 }
 async function setLvl(v){
   try{
+    actErr=null; setConn(null);
     // 守护模式下先接管，否则 10 秒内会被自动改回
     if(MODE!=="manual"){
       await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -173,21 +189,23 @@ async function setLvl(v){
     const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({level:v})});
     paint(d);
-  }catch(e){ setConn("设置档位失败: "+why(e)); }
+  }catch(e){ actErr="设置档位失败: "+why(e); setConn(actErr); }
 }
 async function setHold(){
   try{
+    actErr=null; setConn(null);
     const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({hold:true})});
     MODE="manual"; paint(d);
-  }catch(e){ setConn("接管失败: "+why(e)); }
+  }catch(e){ actErr="接管失败: "+why(e); setConn(actErr); }
 }
 async function setAuto(){
   try{
+    actErr=null; setConn(null);
     const d=await j(API+"/api/now",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({auto:true})});
     MODE="daemon"; paint(d);
-  }catch(e){ setConn("交还守护失败: "+why(e)); }
+  }catch(e){ actErr="交还守护失败: "+why(e); setConn(actErr); }
 }
 
 /* ---------------- 图表（uPlot） ----------------
@@ -396,8 +414,10 @@ async function renderEvents(){
   }catch(e){ setConn("刷新事件流失败: "+why(e)); }
 }
 
+// R-06（五修之首）：'EMERG' 不在此列表 —— 骨架表 #edt 的红色应急行已经渲染 id="e_EMERG"
+// 的输入框。重复 id 让 readEditor 的 last-wins 永远读到高级表那一份，编辑上方应急行被
+// 静默忽略而保存仍报「已保存」（2026-10-17 实测）。应急温度只留一个编辑入口：骨架行。
 const ED_KEYS=[
-  ['EMERG','应急温度 °C','达到即 100% 满速'],
   ['EMERG_REL','应急解除 °C','降到此值才退出应急（防抖）'],
   ['CAP','档位上限 %','正常曲线最高到这'],
   ['TRIM','微调幅度 ±','叠加在骨架上的连续微调'],
@@ -411,6 +431,7 @@ let ED=null;
 
 async function openEditor(){
   try{
+    actErr=null; setConn(null);
     const r=await j(API+"/api/params");
     ED={params:{...r.params}, src:r.params};
     applyIV(r.params&&r.params.IV);   // 运维刚改过 IV？编辑器打开时同步阈值
@@ -418,7 +439,7 @@ async function openEditor(){
     renderEditor();
     document.getElementById('editor').style.display='';
     document.getElementById('editor').scrollIntoView({behavior:'smooth'});
-  }catch(e){ setConn("打开参数编辑器失败: "+why(e)); }   // 编辑器还没弹出来，只能走状态条
+  }catch(e){ actErr="打开参数编辑器失败: "+why(e); setConn(actErr); }   // 编辑器还没弹出来，只能走状态条
 }
 function closeEditor(){document.getElementById('editor').style.display='none';}
 function resetParams(){ED.params={...ED.src};renderEditor();msg('已恢复为当前生效值（未保存）','#8b949e');}
@@ -487,7 +508,10 @@ async function saveParams(){
       applyIV(r.params&&r.params.IV);   // IV 可能被改了 → 滞后阈值跟着换
       msg('✓ 已保存并重启守护','#3fb950');
       renderEditor();
-      if(window.CURVE) renderCurve(r);
+      // R-07a：响应形状就是 curve_view（{"ok":true,"params":…,**curve_view()}），
+      // 但旧代码只渲染不落盘 —— window.CURVE 停在启动时的旧值，8s 轮询/180s 全量刷新
+      // 立刻把表格与阈值标签画回保存前的值。先落地再渲染，两者从此同源。
+      window.CURVE=r; renderCurve(r);
       setTimeout(()=>{document.getElementById('editor').style.display='none';},1200);
     } else {
       msg('✗ '+((r.errors||[]).join('；')),'#f85149');

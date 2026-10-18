@@ -16,6 +16,11 @@ button:hover{background:#30363d;border-color:#8b949e}
 button.on{background:#238636;border-color:#2ea043;color:#fff}
 button.on.auto{background:#1f6feb}
 .rows{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* R-08：裸 fr 轨道的自动最小值 = 子项 min-content；uPlot 的 canvas 带固有像素宽，
+   宽→窄缩放（手机横竖屏旋转）时 .rows 的子项缩不下去、整页锁在最宽宽度并横向溢出
+   （实测 390px 视口 scrollWidth 632）。min-width:0 解除下限，ResizeObserver 才能
+   把 .chartbox 变窄的信号传给 uPlot.setSize。 */
+.rows>*{min-width:0}
 @media(max-width:760px){.rows{grid-template-columns:1fr}.lv{grid-template-columns:repeat(3,1fr)}}
 .chartbox{height:220px}
 table{width:100%;border-collapse:collapse;font-size:13px}
