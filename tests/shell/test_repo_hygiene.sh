@@ -376,6 +376,79 @@ for _d in $_install_real; do
   fi
 done
 echo "  （共 $(printf '%s\n' $_install_real | grep -c . ) 个安装目标，已全部被恢复点逻辑覆盖；platform.conf 因只在缺失时写而豁免）"
+
+# ---- T16b: 核对脚本必须与【安装清单】【备份清单】三方对钉（R-12，2026-10-18） ----
+# 背景（实测）：presets 于 99ddc9a 进入 deploy.sh，而 deploy/check-recovery-point.sh
+# 从未跟动 —— 恢复点核对长期只看到 10/17 个路径（5 个二进制 + 2 个曲线预设从未被查），
+# deploy 却照常打印「已确认落地 10/10 个关键路径」。这就是「同一个清单写了两份、
+# 只更新了一份」的静默腐烂。判据落在脚本的 --list 行为输出（它实际会查什么）上，
+# 不是再抄一遍文本；三方（核对表 / 第 3 步 install / 第 1 步备份循环）路径与布局
+# 逐条相等，任何一侧漂移都转红。
+_rp_panel=/RP-GUARD-PANEL
+if [ ! -f deploy/check-recovery-point.sh ]; then
+  ng "deploy/check-recovery-point.sh 不存在 —— 恢复点核对没了（deploy 会因读不到 EXPECTED 中止）"
+else
+  _rp_list=$(sh deploy/check-recovery-point.sh --list "$_rp_panel" 2>/dev/null || true)
+  _rp_check_lay=$(printf '%s\n' "$_rp_list" | grep -E '^(flat|parents) ' | sort)
+  _rp_check_all=$(printf '%s\n' "$_rp_check_lay" | sed 's/^[a-z]* //' | grep . | sort -u)
+  # 第 3 步安装清单（取行尾目标；$PDIR 面板目标归一化成守卫用的假目录）。
+  # platform.conf 只在缺失时写、不覆盖，三方都不含它（核对脚本头部有说明）。
+  _rp_inst=$(awk '/3\/5 安装/,/4\/5/' scripts/deploy.sh \
+             | grep -E 'install -m' | awk '{print $NF}' | tr -d "'" \
+             | grep -v '^/etc/pfan/platform.conf$' \
+             | sed "s|\$PDIR|$_rp_panel|g" | grep . | sort -u)
+  # 第 1 步备份清单：拼回续行后逐个 for 循环取路径；第 1 个循环是扁平二进制、
+  # 第 2 个是 --parents 保完整路径。出现第 3 个循环 = 守卫需要同步（标 extra 转红）。
+  _rp_bk_lay=$(awk '/1\/5 目标机建恢复点/,/2\/5 传输/' scripts/deploy.sh \
+               | awk '{ if ($0 ~ /\\$/) { sub(/\\$/,""); buf = buf $0 " " } else { print buf $0; buf="" } }' \
+               | awk '/for f in/{
+                   n++
+                   lay = (n==1) ? "flat" : (n==2) ? "parents" : "extra"
+                   for (i=1;i<=NF;i++) if ($i=="in") {
+                     for (j=i+1;j<=NF;j++) {
+                       v=$j
+                       if (v ~ /;/) { sub(/;.*/,"",v); if (v!="") print lay" "v; break }
+                       print lay" "v
+                     }
+                   }
+                 }' \
+               | sed "s|\$PDIR|$_rp_panel|g" | sort)
+  if [ -z "$_rp_check_all" ]; then
+    ng "check-recovery-point.sh --list 一个路径都没输出（核对脚本被改坏了？）"
+  else
+    _rp_extra=$(printf '%s\n' "$_rp_bk_lay" | grep -c '^extra ' || true)
+    if [ "$_rp_extra" != 0 ]; then
+      ng "第 1 步出现了第 3 个备份循环（守卫只认识 2 个）—— 守卫需要同步"
+    fi
+    # (a) 核对表 vs 备份清单：路径与布局（flat/parents）逐条相等
+    if diff <(printf '%s\n' "$_rp_check_lay") <(printf '%s\n' "$_rp_bk_lay") >/dev/null; then
+      ok "T16b: 核对脚本的 $(printf '%s\n' "$_rp_check_all" | grep -c .) 条路径+布局与第 1 步备份清单逐条一致"
+    else
+      ng "T16b: 核对脚本与备份清单漂移（只更新了一侧）："
+      diff <(printf '%s\n' "$_rp_check_lay") <(printf '%s\n' "$_rp_bk_lay") | head -8 | sed 's/^/      /'
+    fi
+    # (b) 安装清单 ⊆ 核对表（危险方向：第 3 步会覆盖、但没人核对）
+    _rp_d1=$(comm -23 <(printf '%s\n' "$_rp_inst") <(printf '%s\n' "$_rp_check_all"))
+    # (c) 核对表 ⊆ 安装清单（反向：核对了一个第 3 步不覆盖的陈旧条目）
+    _rp_d2=$(comm -13 <(printf '%s\n' "$_rp_inst") <(printf '%s\n' "$_rp_check_all"))
+    if [ -z "$_rp_d1" ] && [ -z "$_rp_d2" ]; then
+      ok "T16b: 核对脚本与第 3 步安装清单互为一致（$(printf '%s\n' "$_rp_inst" | grep -c .) 个路径）"
+    else
+      [ -n "$_rp_d1" ] && { ng "T16b: 第 3 步会覆盖、核对脚本没查："; printf '%s\n' "$_rp_d1" | sed 's/^/      /'; }
+      [ -n "$_rp_d2" ] && { ng "T16b: 核对脚本查了、第 3 步不覆盖（陈旧条目）："; printf '%s\n' "$_rp_d2" | sed 's/^/      /'; }
+    fi
+    # (d) 输出格式是 deploy.sh 的解析契约（EXPECTED/PRESENT 前缀 + MISS 行）
+    _rp_tmp=$(mktemp -d)
+    _rp_out=$(sh deploy/check-recovery-point.sh "$_rp_tmp" "$_rp_panel" 2>/dev/null || true)
+    rm -rf "$_rp_tmp"
+    if printf '%s\n' "$_rp_out" | grep -qE '^EXPECTED [0-9]+$' \
+       && printf '%s\n' "$_rp_out" | grep -qE '^PRESENT [0-9]+$'; then
+      ok "T16b: 核对脚本输出契约（EXPECTED/PRESENT 行）仍可被 deploy.sh 解析"
+    else
+      ng "T16b: 核对脚本输出缺 EXPECTED/PRESENT 行 —— deploy.sh 会误判『核对脚本没跑起来』"
+    fi
+  fi
+fi
 echo
 echo "== T17: 开源前置条件：LICENSE / NOTICE / 第三方声明 =="
 # 专家审计 checklist 第 1-3 项（硬阻断）：仓库声称 GPL-3.0-or-later 却没有 LICENSE，

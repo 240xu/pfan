@@ -90,6 +90,7 @@ curl -fsS http://<host>:8789/api/now | jq .
 2. 目标机建恢复点 `/root/backups/pfan-deploy-<时间戳>/`，新文件暂存 `/tmp/pfan-deploy-$$`
 3. 传输 + 安装：`/etc/pfan/platform.conf` **只在缺失时**由 example 建立（已有配置绝不覆盖）；
    运行单元 / 加载器 / logrotate（带 `logrotate -d` 自检）/ 面板 7 文件（4 主文件 + 3 vendor）
+   / 2 个曲线预设（`/opt/pfanctl/presets/`）
 4. 重启 `pfanel`、`pfand`，4b 段轮询等控制回路接管（`pfand=active` 且 `level>=1`，最多 30s）
 5. 实机 `bash scripts/smoke.sh`
 
@@ -107,20 +108,40 @@ curl -fsS http://<host>:8789/api/now | jq .
 
 ### 回滚
 
-`deploy.sh` 只备份、不提供一键回滚；恢复点路径打印在脚本结尾。**部署会在恢复点
-不完整时直接中止**（`deploy/check-recovery-point.sh` 逐个核对第 3 步要覆盖的每一个
-路径），所以打印出来的恢复点一定是齐的 —— 这一条由 `test_repo_hygiene` T16 从安装
-清单派生守着。
+`deploy.sh` 只备份、不提供一键回滚；恢复点路径打印在脚本结尾。
 
-恢复点的布局是**混合**的，因为备份分两批：
+**部署会在恢复点不完整时直接中止**：`deploy/check-recovery-point.sh` 逐个核对的是
+第 3 步会**覆盖**的 **17 个路径** —— 5 个二进制（`/usr/local/bin/` 下）、logrotate
+规则、`platform.sh`、`fan-candidates.txt`、面板 7 文件（4 主文件 + 3 vendor）、
+2 个曲线预设。判据是「文件在部署前【存在于机器上】、恢复点里却没有」：机器上本来
+就不存在的文件（首台机器上的面板、尚未装过的预设）不算缺；但 17 个里凡是应当备份
+的少一个，`PRESENT` 就小于 `EXPECTED`，部署在安装之前中止。所以 deploy 正常跑完时，
+**每一个部署前存在、且第 3 步会覆盖的路径都在恢复点里**。核对脚本、第 3 步安装清单
+与第 1 步备份清单三方由 `test_repo_hygiene` T16/T16b 逐条对钉，任何一方单独漂移都会
+转红。
+
+> ⚠ 上下文（2026-10-18）：上面这个保证在当天之前并不成立 —— 核对脚本只查 10 个路径
+> （面板 7 + logrotate + platform.sh + fan-candidates），5 个二进制与 2 个曲线预设
+> 根本没查，而 deploy 照常打印「已确认落地 10/10 个关键路径」。presets 于 `99ddc9a`
+> 进入 deploy.sh 时，核对脚本从未跟动。现已扩到 17 个并加了三方对钉守卫。
+
+两个**不在核对范围**的路径（也因此恢复点里可能多出一个文件）：
+
+- `/etc/pfan/platform.conf` —— 只在缺失时由 example 建立，部署不覆盖它，所以也不
+  备份、不核对；它在恢复点里【不存在】是正常的。
+- `<面板目录>/pfan.html` —— 旧版遗留的单文件面板，deploy 不再安装它；机器上若还
+  留着，备份循环会顺手把它拷进 `$B/`，所以它【可能】出现在恢复点根下，但缺它不算缺。
+
+恢复点的布局是**混合**的，因为备份分两批（与核对脚本里的 `flat`/`parents` 布局一一对应）：
 
 ```
-$B/pfand  $B/pfan  $B/pfanel.py  $B/pfan_platform.py  $B/pfan_core.py  $B/pfan.html
-   ↑ 5 个可执行件用 cp -a，落在 $B 根
+$B/pfand  $B/pfan  $B/pfanel.py  $B/pfan_platform.py  $B/pfan_core.py  [$B/pfan.html]
+   ↑ 5 个二进制用 cp -a 落在 $B 根（[ ] 内是旧版遗留件，机器上存在才备份，不核对）
 $B/etc/logrotate.d/pfan   $B/etc/pfan/fan-candidates.txt
 $B/usr/local/lib/pfan/platform.sh
+$B/opt/pfanctl/presets/pfan.conf.cool-quiet  $B/opt/pfanctl/presets/pfan.conf.performance
 $B/opt/beszel/beszel_data/{index.html,styles.css,app.js,core.js,vendor/uPlot.*}
-   ↑ 其余用 cp -a --parents，保留完整路径
+   ↑ 其余 12 个用 cp -a --parents，保留完整路径
 ```
 
 手工回滚（布局核对自恢复点 `/root/backups/pfan-deploy-<timestamp>` 的实际内容，
@@ -129,15 +150,20 @@ $B/opt/beszel/beszel_data/{index.html,styles.css,app.js,core.js,vendor/uPlot.*}
 ```bash
 B=/root/backups/pfan-deploy-<ts>            # deploy 结尾打印的那个
 
-# ① 先核对恢复点真的齐（deploy 部署时跑过，这里可以再确认一次）
-sudo -n sh /tmp/pfan-deploy-*/deploy/check-recovery-point.sh "$B"   # 若暂存区已清，见下方注释
-#   EXPECTED N / PRESENT M 两者必须相等；不等就别回滚，先查为什么
+# ① 先核对恢复点真的齐（deploy 部署时跑过，这里可以再确认一次）。
+#    脚本随仓库走：deploy/check-recovery-point.sh；它必须【在目标机上】运行 ——
+#    查的是目标机的绝对路径。把仓库里那份经 stdin 递过去：
+#      sh deploy/check-recovery-point.sh --list      # 本地演练：打印核对范围，不碰文件系统
+#      ssh fanhost "sudo -n sh -s $B /opt/beszel/beszel_data" < deploy/check-recovery-point.sh
+#    第二个参数是面板目录，取自目标机 /etc/pfan/platform.conf 的 PANEL_DIR。
+#    EXPECTED N / PRESENT M 两者必须相等；不等就别回滚，先查为什么
 
 # ② 二进制
 sudo -n cp -a "$B"/pfand "$B"/pfan "$B"/pfanel.py "$B"/pfan_platform.py "$B"/pfan_core.py /usr/local/bin/
 
 # ③ 其余按 --parents 布局原样还原（这是 2026-10-09 之前漏掉的部分：
-#    面板 + logrotate 规则 + platform.sh + fan-candidates.txt）
+#    面板 + logrotate 规则 + platform.sh + fan-candidates.txt；`$B/opt/.`
+#    还覆盖 2 个曲线预设 —— 它们从 2026-10-18 起也在核对范围内）
 sudo -n cp -a "$B"/etc/.   /etc/
 sudo -n cp -a "$B"/usr/.   /usr/
 sudo -n cp -a "$B"/opt/.   /opt/
@@ -150,8 +176,9 @@ bash scripts/smoke.sh          # 回滚后必须全绿
 ⚠ **内核模块不在恢复点里**，而且 `deploy.sh` 也不碰它 —— 模块重建与重载是独立
 流程，见下一节。若一次部署同时换了模块，得单独按那节回退。
 
-⚠ 上面第 ① 步引用的 `check-recovery-point.sh` 位于 deploy 的暂存区，部署成功后会
-被清理。要留着就先 `cp` 一份出来，或者直接手工核对上面列出的 16 个路径。
+⚠ 上面第 ① 步的脚本随仓库走（`deploy/check-recovery-point.sh`）；deploy 暂存区里
+那份部署成功后随暂存区一起清理。`--list` 的输出就是它核对的**全部 17 个路径** ——
+手工核对请对照它，不要再手抄一份清单（手抄正是 2026-10-18 之前漏掉二进制与预设的原因）。
 
 ## 日志
 
