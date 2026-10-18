@@ -21,6 +21,10 @@ PLAT_CAND="${PFAN_CANDIDATES:-$(dirname "$0")/../platform/fan-candidates.txt}"
 #   2026-10-11 实测目标机 /etc/pfan/platform.conf 里 '^PANEL_DIR=' 为 0 行）。
 # 接缝 PFAN_PLATFORM_EXAMPLE 供测试把 example 换成带哨兵值的一份；生产从不设置。
 PLAT_EXAMPLE="${PFAN_PLATFORM_EXAMPLE:-$(dirname "$0")/../platform/platform.conf.example}"
+# 已安装布局下没有 ../platform/ —— example 另装一份在 /usr/local/lib/pfan/（deploy.sh 3b2）。
+# 少这一跳时 `pfan detect` 在任何部署机上 rc=9、什么都不写（2026-10-11 设备实测），
+# 而 pfand 的恢复提示恰恰是「先跑 pfan detect」。形状同上方 PLAT_CAND 的兜底两跳。
+[ -f "$PLAT_EXAMPLE" ] || PLAT_EXAMPLE="${PFAN_PLATFORM_EXAMPLE:-/usr/local/lib/pfan/platform.conf.example}"
 # 测试接缝：真实控制路径需要 /dev/pfanctl 与 /run/pfanel.lock（都要 root），
 # 单测用 PFAN_DEV=/dev/null + PFAN_LOCK=<临时文件> 覆盖。生产从不设置。
 # 预设应用要写的权威文件与要重启的守护（与 pfand 的 PFAN_CONF 同一个接缝）

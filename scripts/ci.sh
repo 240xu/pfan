@@ -72,7 +72,12 @@ step "ruff check server/"
 want ruff
 ruff check server/ || rc=1
 
-if compgen -G "tests/python/*.py" >/dev/null 2>&1; then
+# PFAN_SKIP_PYTEST=1 供 tests/shell/test_guards.sh 的 scratch 树关闭 pytest：
+# T1/T2 要测的是别的守卫，而残缺 scratch 树里的 pytest 失败会把 rc 恒置 1，
+# 断言于是无论守卫死活都走「红」分支（R-11，2026-10-11 实测）。顺带省掉 ~96s。
+if [ "${PFAN_SKIP_PYTEST:-0}" = 1 ]; then
+  echo "SKIP pytest (PFAN_SKIP_PYTEST=1)"
+elif compgen -G "tests/python/*.py" >/dev/null 2>&1; then
   step "pytest tests/python"
   want pytest
   python3 -m pytest -q tests/python || rc=1
@@ -116,7 +121,10 @@ elif [ "$_n" -gt 0 ]; then
   echo "  (提示：准备公开时用 PFAN_PUBLISH=1 git push 强制脱敏全绿；或逐处处理后写进 scripts/sanitize.allow)"
 fi
 
-if compgen -G "tests/js/*.test.js" >/dev/null 2>&1; then
+# PFAN_SKIP_VITEST=1 同理（R-11）：scratch 树不带 node_modules，vitest 缺失恒退 1。
+if [ "${PFAN_SKIP_VITEST:-0}" = 1 ]; then
+  echo "SKIP vitest (PFAN_SKIP_VITEST=1)"
+elif compgen -G "tests/js/*.test.js" >/dev/null 2>&1; then
   step "vitest tests/js"
   if [ -f node_modules/vitest/vitest.mjs ]; then
     node node_modules/vitest/vitest.mjs run tests/js || rc=1

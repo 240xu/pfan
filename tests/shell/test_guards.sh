@@ -16,22 +16,36 @@ fresh_scratch(){
     | (cd "$SCRATCH" && tar -xf -)
 }
 
+# R-11（2026-10-11 实测）：T1/T2 原先只看 rc。scratch 树排除 node_modules，vitest
+# 缺失恒退 1；T1 的树还另有 pytest 失败 —— 于是 rc 恒非 0，两条断言【无论守卫死没死】
+# 都走「红」分支（两条守卫全拆掉 + 注入变异，ci 照样 rc=1，日志里两条守卫的行一句
+# 都没有）。现在用接缝把 pytest/vitest 关掉，断言改成【具体那一行】：
+# 守卫死了，那一行就不出现，测试转红；顺带省掉 ~190s
+# （2026-10-18 实测：整份套件 215s → 16s）。
 sec "T1: 删除核心源文件必须让 ci.sh 报红"
 fresh_scratch
 rm -f "$SCRATCH/core/pfand"
-if (cd "$SCRATCH" && PFAN_SKIP_SHELL_TESTS=1 bash scripts/ci.sh >/dev/null 2>&1); then
+T1LOG=$(cd "$SCRATCH" && PFAN_SKIP_SHELL_TESTS=1 PFAN_SKIP_PYTEST=1 PFAN_SKIP_VITEST=1 \
+        bash scripts/ci.sh 2>&1); T1RC=$?
+if [ "$T1RC" -eq 0 ]; then
   ng "删掉 core/pfand 后 ci.sh 仍 PASS —— 文件缺失是静默跳过的"
+elif grep -qE '^MISSING: core/pfand$' <<<"$T1LOG"; then
+  ok "删掉 core/pfand → ci.sh 报红（rc=$T1RC）且输出含具体的 'MISSING: core/pfand'"
 else
-  ok "删掉 core/pfand → ci.sh 报红"
+  ng "删掉 core/pfand 后 ci.sh rc=$T1RC，但输出里没有 'MISSING: core/pfand' —— 红在别处，清单守卫没在守"
 fi
 
 sec "T2: smoke.sh 里出现写操作必须让 ci.sh 报红"
 fresh_scratch
 printf '\ncurl -X POST http://example.invalid/api/level -d level=100\n' >> "$SCRATCH/scripts/smoke.sh"
-if (cd "$SCRATCH" && PFAN_SKIP_SHELL_TESTS=1 bash scripts/ci.sh >/dev/null 2>&1); then
+T2LOG=$(cd "$SCRATCH" && PFAN_SKIP_SHELL_TESTS=1 PFAN_SKIP_PYTEST=1 PFAN_SKIP_VITEST=1 \
+        bash scripts/ci.sh 2>&1); T2RC=$?
+if [ "$T2RC" -eq 0 ]; then
   ng "smoke.sh 含 POST 仍 PASS —— 只读性质无回归保护"
+elif grep -qE '^smoke 文件含写操作' <<<"$T2LOG"; then
+  ok "smoke.sh 含 POST → ci.sh 报红（rc=$T2RC）且输出含具体的 'smoke 文件含写操作'"
 else
-  ok "smoke.sh 含 POST → ci.sh 报红"
+  ng "smoke.sh 含 POST 后 ci.sh rc=$T2RC，但输出里没有 'smoke 文件含写操作' —— 红在别处，只读守卫没在守"
 fi
 
 sec "T3: fail-safe 断言语义（需暴露 GUARD_FAILSAFE_JQ 且接受 EMERG 参数）"
@@ -197,6 +211,77 @@ else
     ok "缺省预算 ${T6B_RAW}s（> 实测恢复 ${T6B_FLOOR}s，≤ 封顶 ${T6B_CEIL}s）：不传覆盖时冒烟等得起一次完整恢复"
   fi
   rm -rf "$T6BD"
+fi
+
+sec "T7: 已安装布局下 PLAT_EXAMPLE 的兜底两跳（R-10）"
+# 2026-10-11 设备实测：`sudo pfan detect` rc=9、stdout 为空 —— 已安装布局
+# （/usr/local/bin/pfan）下第一跳 ../platform/ 不存在，而 example 从未被装到任何地方，
+# pfand 的恢复提示「先跑 pfan detect」因此在所有部署机上都是死的。修法两半：
+# deploy.sh 3b2 装一份到 /usr/local/lib/pfan/，core/pfan 加第二跳 [ -f ] || 兜底。
+#
+# 这里【真跑】装好布局的 pfan：proot 把 /usr/local 映射到临时树（测试机没 root、
+# 没有 /usr/local，绝对路径只能这么模拟），树里只有第二跳那份 example（带哨兵值）。
+# 判据是行为不是源码文本：rc=0 且输出的 PANEL_DIR 等于【第二跳那份文件】的值。
+# 缺 proot 就报红（不静默跳过）—— 这条守卫要的正是绝对路径下的布局行为。
+T7BASH=$(command -v bash)
+if ! command -v proot >/dev/null 2>&1; then
+  ng "缺 proot —— 无法把 /usr/local 映射到临时树来模拟已安装布局，这条守卫在本机跑不了"
+else
+  T7D=$(mktemp -d "${TMPDIR:-/tmp}/pfan-t7.XXXXXX")
+  mkdir -p "$T7D/usr/local/bin" "$T7D/usr/local/lib/pfan" "$T7D/thermal/thermal_zone0"
+  echo x86_pkg_temp > "$T7D/thermal/thermal_zone0/type"
+  cp core/pfan "$T7D/usr/local/bin/pfan"
+  cp core/platform.sh "$T7D/usr/local/lib/pfan/platform.sh"
+  sed 's|^PANEL_DIR=.*|PANEL_DIR=/t7-sentinel-panel|' platform/platform.conf.example \
+    > "$T7D/usr/local/lib/pfan/platform.conf.example"
+  t7_run(){ # t7_run <pfan 路径>：stdout 原样返回，stderr 落 $T7D/err
+    env -u PFAN_PLATFORM_EXAMPLE \
+      PFAN_THERMAL_DIR="$T7D/thermal" PFAN_ACPI_PROBE='ok:\_SB.T7' \
+      PFAN_CANDIDATES="$repo/platform/fan-candidates.txt" \
+      proot -b "$T7D/usr/local:/usr/local" "$T7BASH" "$1" detect 2>"$T7D/err"
+  }
+  T7OUT=$(t7_run "$T7D/usr/local/bin/pfan"); T7RC=$?
+  if [ "$T7RC" -ne 0 ]; then
+    ng "已安装布局下 detect rc=$T7RC（期望 0）—— 第二跳没生效（stderr: $(head -1 "$T7D/err")）"
+  elif grep -qx 'PANEL_DIR=/t7-sentinel-panel' <<<"$T7OUT"; then
+    ok "已安装布局下 detect rc=0，PANEL_DIR 取自 /usr/local/lib/pfan/ 的 example（第二跳生效）"
+  else
+    ng "已安装布局下 detect rc=0 但 PANEL_DIR 不对：$(printf '%s\n' "$T7OUT" | grep '^PANEL_DIR=' || echo '<没有这一键>')（期望 /t7-sentinel-panel）"
+  fi
+  # 反向控制：删掉第二跳那份文件 ⇒ 必须 rc=9、无 PANEL_DIR（fail-closed，不猜值）。
+  # 没有它时，一个「第一跳其实还在」的假布局会让上面那条假绿。
+  rm -f "$T7D/usr/local/lib/pfan/platform.conf.example"
+  T7OUT2=$(t7_run "$T7D/usr/local/bin/pfan"); T7RC2=$?
+  if [ "$T7RC2" -eq 9 ] && ! grep -q '^PANEL_DIR=' <<<"$T7OUT2"; then
+    ok "第二跳文件消失 ⇒ rc=9、无 PANEL_DIR（fail-closed，不猜值）"
+  else
+    ng "第二跳文件消失后 rc=$T7RC2（期望 9）、PANEL_DIR=$(printf '%s\n' "$T7OUT2" | grep '^PANEL_DIR=' || echo '<无>')"
+  fi
+  rm -rf "$T7D"
+fi
+
+sec "T8: 两个新接缝（PFAN_SKIP_PYTEST/VITEST）的缺省必须是【关】—— 否则真 CI 会静默少两层"
+# T1/T2 显式传了接缝，证明不了「不传时 pytest/vitest 真的会跑」。探针树里放一条
+# 必然失败的 pytest 用例；不传接缝时必须【跑到】pytest 与 vitest 两步（vitest 在
+# scratch 里因缺 node_modules 而失败，正是 R-11 的成因）。任一步被静默跳过
+# （例如把 :-0 写成 :-1），探针就看不见对应的行，这里转红。
+fresh_scratch
+rm -f "$SCRATCH"/tests/python/*.py
+printf 'def test_zz_seam_probe():\n    assert False, "seam probe"\n' > "$SCRATCH/tests/python/test_zz_seam_probe.py"
+T8LOG=$(cd "$SCRATCH" && PFAN_SKIP_SHELL_TESTS=1 bash scripts/ci.sh 2>&1); T8RC=$?
+if [ "$T8RC" -eq 0 ]; then
+  ng "探针树（pytest 必失败 + 无 node_modules）里 ci.sh 仍 PASS —— pytest/vitest 至少一步被静默跳过"
+else
+  if grep -qF '=== pytest tests/python ===' <<<"$T8LOG"; then
+    ok "不传接缝时 pytest 步真的在跑（缺省=关）"
+  else
+    ng "不传接缝时 pytest 步没跑 —— PFAN_SKIP_PYTEST 缺省被改成跳过，真 CI 会静默少一层"
+  fi
+  if grep -qF 'MISSING: node_modules/vitest/vitest.mjs' <<<"$T8LOG"; then
+    ok "不传接缝时 vitest 步真的在跑（缺省=关）"
+  else
+    ng "不传接缝时 vitest 步没跑 —— PFAN_SKIP_VITEST 缺省被改成跳过，真 CI 会静默少一层"
+  fi
 fi
 
 printf '\n== test_guards: %s (fails=%d) ==\n' "$([ "$fails" -eq 0 ] && echo PASS || echo FAIL)" "$fails"

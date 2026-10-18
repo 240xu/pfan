@@ -104,6 +104,7 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan $PDI
         # 旧面板」的混合态，而重跑 deploy 会把混合态再备一次，原始好状态永远丢失
         # （专家审计 C2）。platform.conf 例外：它只在【缺失时】写入，不覆盖。
         for f in /etc/logrotate.d/pfan /usr/local/lib/pfan/platform.sh \
+                 /usr/local/lib/pfan/platform.conf.example \
                  /etc/pfan/fan-candidates.txt \
                  $PDIR/index.html $PDIR/styles.css \
                  $PDIR/app.js $PDIR/core.js \
@@ -212,6 +213,10 @@ R "set -e
     sudo -n install -m 644 '$STAGE/fan-candidates.txt' /etc/pfan/fan-candidates.txt
     # 3b. 加载器（pfan/pfand 的 _plat_sh 默认路径）
     sudo -n install -m 644 '$STAGE/platform.sh' /usr/local/lib/pfan/platform.sh
+    # 3b2. example 的已安装副本 —— core/pfan 在仓库外的兜底两跳读它（R-10，2026-10-11）。
+    #      不装时 detect 在任何部署机上第一跳指向不存在的 ../platform/、直接 rc=9 且
+    #      什么都不写，而 pfand 的恢复提示恰恰是「先跑 pfan detect」。
+    sudo -n install -m 644 '$STAGE/platform.conf.example' /usr/local/lib/pfan/platform.conf.example
     # 3c. 运行单元（python 模块必须与 pfanel.py 同目录：sys.path[0] 就是脚本目录）
     sudo -n install -m 755 '$STAGE/pfand'        /usr/local/bin/pfand
     sudo -n install -m 755 '$STAGE/pfan-cli'     /usr/local/bin/pfan

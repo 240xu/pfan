@@ -1,6 +1,6 @@
 #!/bin/sh
 # deploy/check-recovery-point.sh — 核对恢复点真的覆盖了 deploy.sh 第 3 步会覆盖的
-# 每一个已有文件（17 个路径：5 个二进制 + 12 个按完整路径备份的文件）。
+# 每一个已有文件（18 个路径：5 个二进制 + 13 个按完整路径备份的文件）。
 #
 # 为什么需要它（专家审计 I-1，实测确认）：deploy.sh 的备份循环里每条 cp 都跟 `|| true`，
 # 磁盘满 / ACL 拒绝 / 读错误全被吞掉，部署照常覆盖二进制 + 面板 + logrotate +
@@ -8,11 +8,12 @@
 # 实测真的发生过：面板目录是 drwx------ root:root，非 sudo 的 [ -e ] 一律 false，
 # 7 个面板文件被静默跳过，而没有任何一行输出提示。
 #
-# 核对范围（2026-10-18 由 10 个扩到 17 个，此前二进制与曲线预设从未被核对过，
-# 而 deploy 照样打印「已确认落地 10/10 个关键路径」）：
+# 核对范围（2026-10-18 由 10 个扩到 17 个、再随 R-10 补 example 副本到 18 个；
+# 此前二进制与曲线预设从未被核对过，而 deploy 照样打印「已确认落地 10/10 个关键路径」）：
 #   · 5 个二进制      /usr/local/bin/{pfand,pfan,pfanel.py,pfan_platform.py,pfan_core.py}
 #   · logrotate 规则  /etc/logrotate.d/pfan
 #   · 平台加载器      /usr/local/lib/pfan/platform.sh
+#   · example 副本    /usr/local/lib/pfan/platform.conf.example（core/pfan detect 的兜底源）
 #   · 候选表          /etc/pfan/fan-candidates.txt
 #   · 面板 7 文件     <面板目录>/{index.html,styles.css,app.js,core.js,vendor/uPlot.*}
 #   · 2 个曲线预设    /opt/pfanctl/presets/pfan.conf.{cool-quiet,performance}
@@ -53,6 +54,7 @@ flat /usr/local/bin/pfan_platform.py
 flat /usr/local/bin/pfan_core.py
 parents /etc/logrotate.d/pfan
 parents /usr/local/lib/pfan/platform.sh
+parents /usr/local/lib/pfan/platform.conf.example
 parents /etc/pfan/fan-candidates.txt
 parents $PANEL/index.html
 parents $PANEL/styles.css

@@ -111,19 +111,20 @@ curl -fsS http://<host>:8789/api/now | jq .
 `deploy.sh` 只备份、不提供一键回滚；恢复点路径打印在脚本结尾。
 
 **部署会在恢复点不完整时直接中止**：`deploy/check-recovery-point.sh` 逐个核对的是
-第 3 步会**覆盖**的 **17 个路径** —— 5 个二进制（`/usr/local/bin/` 下）、logrotate
-规则、`platform.sh`、`fan-candidates.txt`、面板 7 文件（4 主文件 + 3 vendor）、
-2 个曲线预设。判据是「文件在部署前【存在于机器上】、恢复点里却没有」：机器上本来
-就不存在的文件（首台机器上的面板、尚未装过的预设）不算缺；但 17 个里凡是应当备份
-的少一个，`PRESENT` 就小于 `EXPECTED`，部署在安装之前中止。所以 deploy 正常跑完时，
-**每一个部署前存在、且第 3 步会覆盖的路径都在恢复点里**。核对脚本、第 3 步安装清单
-与第 1 步备份清单三方由 `test_repo_hygiene` T16/T16b 逐条对钉，任何一方单独漂移都会
-转红。
+第 3 步会**覆盖**的 **18 个路径** —— 5 个二进制（`/usr/local/bin/` 下）、logrotate
+规则、`platform.sh` 与它的 example 副本（`/usr/local/lib/pfan/`）、`fan-candidates.txt`、
+面板 7 文件（4 主文件 + 3 vendor）、2 个曲线预设。判据是「文件在部署前【存在于机器上】、
+恢复点里却没有」：机器上本来就不存在的文件（首台机器上的面板、尚未装过的预设）不算缺；
+但 18 个里凡是应当备份的少一个，`PRESENT` 就小于 `EXPECTED`，部署在安装之前中止。所以
+deploy 正常跑完时，**每一个部署前存在、且第 3 步会覆盖的路径都在恢复点里**。核对脚本、
+第 3 步安装清单与第 1 步备份清单三方由 `test_repo_hygiene` T16/T16b 逐条对钉，任何一方
+单独漂移都会转红。
 
 > ⚠ 上下文（2026-10-18）：上面这个保证在当天之前并不成立 —— 核对脚本只查 10 个路径
 > （面板 7 + logrotate + platform.sh + fan-candidates），5 个二进制与 2 个曲线预设
 > 根本没查，而 deploy 照常打印「已确认落地 10/10 个关键路径」。presets 于 `99ddc9a`
-> 进入 deploy.sh 时，核对脚本从未跟动。现已扩到 17 个并加了三方对钉守卫。
+> 进入 deploy.sh 时，核对脚本从未跟动。现已扩到 18 个（含 R-10 新增的 example 副本）
+> 并加了三方对钉守卫。
 
 两个**不在核对范围**的路径（也因此恢复点里可能多出一个文件）：
 
@@ -138,10 +139,10 @@ curl -fsS http://<host>:8789/api/now | jq .
 $B/pfand  $B/pfan  $B/pfanel.py  $B/pfan_platform.py  $B/pfan_core.py  [$B/pfan.html]
    ↑ 5 个二进制用 cp -a 落在 $B 根（[ ] 内是旧版遗留件，机器上存在才备份，不核对）
 $B/etc/logrotate.d/pfan   $B/etc/pfan/fan-candidates.txt
-$B/usr/local/lib/pfan/platform.sh
+$B/usr/local/lib/pfan/platform.sh   $B/usr/local/lib/pfan/platform.conf.example
 $B/opt/pfanctl/presets/pfan.conf.cool-quiet  $B/opt/pfanctl/presets/pfan.conf.performance
 $B/opt/beszel/beszel_data/{index.html,styles.css,app.js,core.js,vendor/uPlot.*}
-   ↑ 其余 12 个用 cp -a --parents，保留完整路径
+   ↑ 其余 13 个用 cp -a --parents，保留完整路径
 ```
 
 手工回滚（布局核对自恢复点 `/root/backups/pfan-deploy-<timestamp>` 的实际内容，
@@ -177,7 +178,7 @@ bash scripts/smoke.sh          # 回滚后必须全绿
 流程，见下一节。若一次部署同时换了模块，得单独按那节回退。
 
 ⚠ 上面第 ① 步的脚本随仓库走（`deploy/check-recovery-point.sh`）；deploy 暂存区里
-那份部署成功后随暂存区一起清理。`--list` 的输出就是它核对的**全部 17 个路径** ——
+那份部署成功后随暂存区一起清理。`--list` 的输出就是它核对的**全部 18 个路径** ——
 手工核对请对照它，不要再手抄一份清单（手抄正是 2026-10-18 之前漏掉二进制与预设的原因）。
 
 ## 日志
