@@ -610,11 +610,11 @@ def apply_persisted_state():
             # 异常在 EC88 展开时就抛了，档位永远不恢复）。
             subprocess.run(["systemctl", "stop", "pfand"], capture_output=True)
             # level=0 与 level 缺失都不是"有意的 0"：set_level() 把档位钳在 >=1，
-            # 所以 0 永远只意味着"从没按过档位按钮"（缺省值见 :82）。旧实现把它当成
+            # 所以 0 永远只意味着"从没按过档位按钮"（缺省值见 get_state() 的 d.get("level", 0)）。旧实现把它当成
             # "无可恢复"，于是 free 曲线在每次 pfanel 启动（含每次 deploy.sh）之后都把
             # 风扇留在 _FSL 1 0 —— 而 s0i3 下 0 就是停转（实测，spec F2）。
             # 回落值取 MIN_SAFE_LEVEL（FPS 表最低档），并且必须真的写出去。
-            # 存档里的 level 未必是整数：get_state() 原样返回 JSON 的值（:82），而
+            # 存档里的 level 未必是整数：get_state() 原样返回 JSON 的值，而
             # 曲线文件是人手可改的文本。旧的 `not _lv or int(_lv) < 1` 对 "abc" 短路失败 ——
             # not "abc" 是 False，于是求值 int("abc") 抛 ValueError，被外层 except 吞掉，
             # 风扇停在两步之前刚写下的 _FSL 1 0：同一个"留下停转"换了条触发路径又回来了。
@@ -1049,7 +1049,7 @@ class H(http.server.BaseHTTPRequestHandler):
         # 忽略端口与协议，于是 localhost:9999 / 192.168.1.10:8080 / pfan.example.com:<任意>
         # 这些同主机不同端口的页面全都能【免 token】写档位。SECURITY.md 承诺的是"必须带
         # token"，文档与代码不一致，而且这是本仓库的安全头条。
-        # 面板始终注入 token（app.js:5），"旧缓存页面没 token"的过渡理由早已失效。
+        # 面板始终注入 token（app.js 顶层的 TOKEN 占位符），"旧缓存页面没 token"的过渡理由早已失效。
         tok = self.headers.get("X-Pfan-Token", "")
         origin = self.headers.get("Origin", "") or ""
         if tok != get_token():

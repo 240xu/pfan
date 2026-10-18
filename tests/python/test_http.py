@@ -266,7 +266,7 @@ def test_curve_view_uses_shared_fps_table():
 # ---------------- C1: 写接口鉴权的真实规则 ----------------
 # SECURITY.md 承诺「写接口必须带 X-Pfan-Token」，但代码曾是 `token 或 Origin 白名单`：
 # Origin 只比对主机名、忽略端口与协议 → 同主机【任意端口】上的页面都能免 token 写。
-# 面板始终注入 token（app.js:5），这条宽限没有存在理由。
+# 面板始终注入 token（app.js 顶层的 TOKEN 占位符），这条宽限没有存在理由。
 
 def _post(port, token=None, origin=None, level=50):
     req = urllib.request.Request(
@@ -432,10 +432,13 @@ def test_free_curve_must_not_break_persisted_state_restore():
     """
     pfanel._APPLIED = False
     # 本机（Termux）没有 systemd，直接调 subprocess 会在 systemctl 上 FileNotFoundError，
-    # 与被测逻辑无关。打桩掉：这里要验的是"档位有没有被恢复"，不是服务管理。
+    # 与被测逻辑无关。只打桩 systemctl：早先这里打桩的是 subprocess.run 的【全部】调用，
+    # 连假 dmesg 一起打死，于是每次 acpi() 都要空转满 20×0.12s 的轮询超时（六条
+    # 持久化用例合计 ~58s，R-15）；只换上 systemctl 后假设备照常应答，这条用例
+    # 也第一次真的走到了"设备确认写入"那一侧。要验的是"档位有没有被恢复"，不是服务管理。
     import subprocess as _sp
     _real = _sp.run
-    _sp.run = lambda *a, **k: _real(["true"], capture_output=True)
+    _sp.run = _systemctl_stub("inactive", _real)
     # 同理：/var/log 在本机不存在（生产机有），日志写不出去不该算缺陷
     _pf = os.path.join(_STATE, "pfanel.log")
     _real_open = builtins.open
@@ -476,7 +479,7 @@ def test_free_curve_must_not_break_persisted_state_restore():
 # 也就是从没按过档位按钮的【默认状态】—— 旧实现是掉进"无可恢复"的。
 
 def test_persisted_state_with_zero_level_falls_back_not_stops():
-    """level=0 不是"有意的 0"，而是"从没按过档位按钮"的默认状态（pfanel.py:82）。
+    """level=0 不是"有意的 0"，而是"从没按过档位按钮"的默认状态（见 get_state() 的 d.get("level", 0)）。
 
     set_level 把档位钳在 >=1，所以 0 永远不是一次有意的选择。旧实现
     `if st.get("level"):` 把 0 当成"无可恢复"，于是 free 曲线在每次 pfanel
@@ -491,7 +494,7 @@ def test_persisted_state_with_zero_level_falls_back_not_stops():
     import builtins as _b
     import subprocess as _sp
     _real_run, _real_open = _sp.run, _b.open
-    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
         _real_open(os.path.join(os.path.dirname(dev), "pfanel.log"), "a")
         if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
@@ -511,10 +514,33 @@ def test_persisted_state_with_zero_level_falls_back_not_stops():
     )
 
 
+def test_get_state_missing_level_key_is_zero_and_explicit_null_is_none():
+    """缺 level 键 -> 0（与 level=0 同路）；显式 null -> None（TypeError 分支唯一的输入）。
+
+    别处多处注释引用这条事实（apply_persisted_state 的回落分支、本文件三条 docstring）。
+    注释会腐烂（R-17 记的就是这种腐烂：行号引用写错一次、随后的编辑再让它漂移），
+    这里把事实本身钉住 —— 把 get_state 的 d.get("level", 0) 改成 d.get("level")，
+    本用例第一段立刻转红。
+    """
+    curve_file = os.environ["PFAN_CURVE_FILE"]
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free"}, fh)      # 没有 level 键
+    st = pfanel.get_state()
+    assert st["level"] == 0 and st["level"] is not None, (
+        "缺 level 键时 get_state 给出 %r —— 缺键必须与 level=0 同路；"
+        "给 None 会把“没按过档位”误判成 TypeError 分支" % (st["level"],)
+    )
+    with open(curve_file, "w", encoding="utf-8") as fh:
+        json.dump({"curve": "free", "level": None}, fh)   # 显式 null
+    assert pfanel.get_state()["level"] is None, (
+        "显式 null 必须原样保留为 None —— 它是 int(None) TypeError 分支唯一的触发输入"
+    )
+
+
 def test_persisted_state_with_null_level_falls_back_not_stops():
     """state 里 level 显式为 null —— 这是唯一能走到 int() 的 TypeError 分支的输入。
 
-    别把它和"缺 level 键"混为一谈：get_state() 写的是 d.get("level", 0)（pfanel.py:82），
+    别把它和"缺 level 键"混为一谈：get_state() 写的是 d.get("level", 0)，
     所以**缺键得到的是 0，不是 None**。缺键那条与 level=0 的设备输出逐字节相同，
     由上一条测试覆盖；把它当"缺键测试"写不会多覆盖任何分支，只会让 docstring 说谎。
 
@@ -535,7 +561,7 @@ def test_persisted_state_with_null_level_falls_back_not_stops():
     import re as _re
 
     _real_run, _real_open = _sp.run, _b.open
-    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
         _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
     try:
@@ -561,7 +587,7 @@ def test_persisted_state_with_null_level_falls_back_not_stops():
 
 
 # ---------------- 续：存档 level 不是整数（"abc"）同样必须回落，而不是留下停转 ----------------
-# get_state() 把 JSON 里的 level 原样返回（pfanel.py:82），所以手改/写坏的曲线文件
+# get_state() 把 JSON 里的 level 原样返回，所以手改/写坏的曲线文件
 # 能把字符串送进还原分支。旧实现 `not _lv or int(_lv) < 1` 在 "abc" 上短路失败：
 # not "abc" 为 False → 求值 int("abc") 抛 ValueError → 被外层 except 吞掉 →
 # 日志只写"还原失败"，而 _FSL 停在两步之前刚写下的 1 0 —— 同一个"留下停转"的终态
@@ -588,7 +614,7 @@ def test_persisted_state_with_non_integer_level_falls_back_not_stops():
     import re as _re
 
     _real_run, _real_open = _sp.run, _b.open
-    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
         _real_open(log, "a")
         if str(p) == "/var/log/pfanel.log"
@@ -643,7 +669,7 @@ def test_persisted_state_with_bool_level_falls_back_not_stops():
     import re as _re
 
     _real_run, _real_open = _sp.run, _b.open
-    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
         _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
     try:
@@ -685,7 +711,7 @@ def test_persisted_state_with_non_finite_float_level_falls_back_not_stops():
     import re as _re
 
     _real_run, _real_open = _sp.run, _b.open
-    _sp.run = lambda *a, **k: _real_run(["true"], capture_output=True)
+    _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
         _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
     try:

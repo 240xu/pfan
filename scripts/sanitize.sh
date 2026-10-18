@@ -42,7 +42,7 @@
 # --allow-list 存在的理由：行号锚定时，「这一条现在放行的是哪一行」要靠人去
 # 逐条数行；换成内容指纹之后这个信息从清单里消失了，于是补一个只读视图把它算
 # 回来（指纹 -> 当前文件:行号）。它不参与判定，只是审计用的第二双眼睛：
-# 判定逻辑只有下面 _exempt_by 那一个函数。
+# 判定逻辑只有下面 _covering_entries 那一个函数（主扫描里的 _exempt_by 只是它的调用方）。
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -172,38 +172,57 @@ _sha256() { # stdin -> 64 位十六进制（去掉工具各自的输出包装）
 #   1. 路径正则命中该文件（字段 1）
 #   2. 那一行内容的指纹在字段 2 的列表里（字段 2，整条相等，不是子串）
 #   3. 同一份内容在该文件里【只出现一次】—— 见下面 _dup 的解释
-# 只有这一处判定。--allow-list 与 T25 都必须与它一致，否则「清单说豁免了」和
-# 「门真的豁免了」就会各说各话，而那正是这道门要拦的那类失败。
-_exempt_by() { # _exempt_by <文件> <行号> <该行全文>；命中则返回 0
-  local f=$1 ln=$2 txt=$3 a af rest hashes one h _dup
+# 这个判据【只有这一份实现】。主扫描（_exempt_by）、--allow-list 的归因视图
+# （_covering_entry）与它的反向统计都只是这里的调用方 —— 谓词复制成三份时，
+# 任何一处先过期，「清单说豁免了」与「门真的豁免了」就会各说各话，而那正是
+# 这道门存在的意义要拦的那类失败。
+# 输出：盖住这一处的豁免条目序号（每行一个；条目对照 --allow-list 里的 [N]）。
+# 无输出且返回 1 = 不放行；重复内容命中指纹时报 [WARN]（stderr）后同样不放行。
+_covering_entries() { # _covering_entries <文件> <行号> <该行全文>
+  local f=$1 ln=$2 txt=$3
   [ -n "$txt" ] || return 1   # 空行不可能是命中；真为空说明上游出了意外，不放行
   [ -n "$SHA_TOOL" ] || return 1  # 清单不在（没有东西要豁免）：不匹配，也不放行
+  local h a k=0 af rest hashes one _hl hit=""
   h=$(_sha256 <<<"$txt")
   for a in "${ALLOW_PATTERNS[@]}"; do
-    [ -n "$a" ] || continue
+    k=$((k + 1))
     af=${a%%$'\t'*}
+    # [[ =~ ]] 是 bash 内建：对这里这种锚死的简单路径正则与 grep -qE 逐字节等价，
+    # 但不起子进程。此前每条豁免都要 fork 一个 grep，占了门的大半墙钟
+    # （实测 11.6s -> 2.7s；R-14 的账在 ledger 里）。
+    [[ "$f" =~ $af ]] || continue
     rest=${a#*$'\t'}
     hashes=${rest%%$'\t'*}
-    printf '%s' "$f" | grep -qE "$af" 2>/dev/null || continue
-    for one in $(printf '%s' "$hashes" | tr ',' ' '); do
+    IFS=',' read -ra _hl <<<"$hashes"
+    for one in "${_hl[@]}"; do
       [ "$one" = "$h" ] || continue
-      # ⚠ 同一份内容在同一个文件里出现两次以上时【不放行】。指纹钉的是「这一行」，
-      #   而「这一行」是有位置的：有人把同一行复制到同文件别处，那一处是新出现
-      #   的暴露，必须由人裁决，不能因为内容一样就顺带放行。现状是 0 例（26 条
-      #   豁免覆盖的每一行在本文件内都唯一），这条只是把「顺带放过」这条路堵死。
-      #   判失败方向是红的：重复出现时门会报红，需要人来看一眼。
-      #   grep -c 匹配数为 0 时退出码是 1，别写成 `|| echo 0` —— 那会在已经有 0 的
-      #   输出后面再追加一行 0（与 ci.sh 里记过的那次同款陷阱）。
-      _dup=$(grep -cFx -e "$txt" -- "$f" 2>/dev/null) || _dup=0
-      if [ "${_dup:-0}" != 1 ]; then
-        printf '  [WARN] %s:%s 同一份内容在本文件出现 %s 次 —— 豁免按内容锚定，拒绝放行，请人工裁决这份重复\n' \
-          "$f" "$ln" "${_dup:-?}" >&2
-        return 1
-      fi
-      return 0
+      hit="$hit $k"
+      break
     done
   done
-  return 1
+  [ -n "$hit" ] || return 1   # 没有任何条目同时命中路径与指纹：照报
+  # ⚠ 同一份内容在同一个文件里出现两次以上时【不放行】。指纹钉的是「这一行」，
+  #   而「这一行」是有位置的：有人把同一行复制到同文件别处，那一处是新出现
+  #   的暴露，必须由人裁决，不能因为内容一样就顺带放行。现状是 0 例（26 条
+  #   豁免覆盖的每一行在本文件内都唯一），这条只是把「顺带放过」这条路堵死。
+  #   判失败方向是红的：重复出现时门会报红，需要人来看一眼。
+  #   grep -c 匹配数为 0 时退出码是 1，别写成 `|| echo 0` —— 那会在已经有 0 的
+  #   输出后面再追加一行 0（与 ci.sh 里记过的那次同款陷阱）。
+  _dup=$(grep -cFx -e "$txt" -- "$f" 2>/dev/null) || _dup=0
+  if [ "${_dup:-0}" != 1 ]; then
+    printf '  [WARN] %s:%s 同一份内容在本文件出现 %s 次 —— 豁免按内容锚定，拒绝放行，请人工裁决这份重复\n' \
+      "$f" "$ln" "${_dup:-?}" >&2
+    return 1
+  fi
+  for k in $hit; do printf '%s\n' "$k"; done
+  return 0
+}
+
+# 主扫描的判定入口：语义就是 _covering_entries 无命中即红（WARN 由它照常打到
+# stderr）。保留这个名字是因为主扫描、sanitize.allow 与测试的注释都用它指代
+# 「那道判定」——它现在只是上面那份唯一实现的调用方，自己不再含任何谓词。
+_exempt_by() { # _exempt_by <文件> <行号> <该行全文>；命中则返回 0
+  _covering_entries "$1" "$2" "$3" >/dev/null
 }
 
 # ---- 只扫会被发布的文件 ----
@@ -215,7 +234,7 @@ HITSF=$(mktemp "${TMPDIR:-/tmp}/pfansanitize.hits.XXXXXX") || exit 1
 trap 'rm -f "$TMPF" "$HITSF"' EXIT
 
 # ---- 枚举【原始】命中（还没套豁免）：<文件><TAB><行号><TAB><规则说明><TAB><整行原文> ----
-# 主路径与 --allow-list 共用这一个枚举：豁免的判定只有 _exempt_by 一处，两边各扫一遍
+# 主路径与 --allow-list 共用这一个枚举：豁免的判定只有 _covering_entries 一处，两边各扫一遍
 # 的话早晚有一边先过期，而「清单说豁免了」与「门真的豁免了」对不上，正是这道门
 # 存在的意义要拦的那类失败。
 # ⚠ 结果落文件、由 `while read ... done < "$HITSF"` 读回，【不】用管道喂 while：
@@ -258,26 +277,13 @@ if [ "${1:-}" = "--allow-list" ]; then
   # 同一行被两条规则命中时 _raw_hits 会印两遍（每条规则一遍）。反向视图按
   # 文件:行号去重之后再统计，否则「被几条豁免盖住」会把规则条数算成豁免条数。
   _raw_hits | awk -F'\t' '!seen[$1 SUBSEP $2]++' > "$HITSF"
-  # 归因：这一处命中是被哪一条盖住的。判定本身仍然只认 _exempt_by（那三条），
-  # 这里的「是哪一条」只是把结果摆到条目上，供人核对清单用。
+  # 归因：这一处命中是被哪一条盖住的。判定本身仍然只认 _covering_entries（那三条），
+  # 这里只取它输出的第一条（多条同时盖住时，死重量由下面反向视图报）。
   _covering_entry() { # _covering_entry <文件> <该行全文> -> 印条目序号，无则不印
-    local f=$1 txt=$2 k=0 a af rest hashes one h _dup
-    _dup=$(grep -cFx -e "$txt" -- "$f" 2>/dev/null) || _dup=0
-    [ "${_dup:-0}" = 1 ] || return 1          # 与 _exempt_by 第 3 条同一条判据
-    h=$(_sha256 <<<"$txt")
-    for a in "${ALLOW_PATTERNS[@]}"; do
-      k=$((k + 1))
-      af=${a%%$'\t'*}
-      printf '%s' "$f" | grep -qE "$af" 2>/dev/null || continue
-      rest=${a#*$'\t'}
-      hashes=${rest%%$'\t'*}
-      for one in $(printf '%s' "$hashes" | tr ',' ' '); do
-        [ "$one" = "$h" ] || continue
-        printf '%s' "$k"
-        return 0
-      done
-    done
-    return 1
+    local _all
+    _all=$(_covering_entries "$1" "" "$2" 2>/dev/null) || return 1
+    [ -n "$_all" ] || return 1
+    printf '%s' "${_all%%$'\n'*}"
   }
   # 先把「条目 -> 当前放行的 file:line」攒出来（bash 3 没有关联数组，用一张
   # "条目号:文件:行号" 的文本表）。
@@ -307,23 +313,16 @@ if [ "${1:-}" = "--allow-list" ]; then
   done
   # 反向视图：原始命中里哪些没被任何豁免盖住（门会报红的）、哪些被多条同时盖住
   # （纪律 3 说那是死重量）。两段都不是判定，只是把"清单与门对不对得上"摆出来。
-  # ⚠ 判据必须与 _exempt_by 完全一致（包括唯一性那条），否则这个视图会替门说谎：
-  #   指纹对得上但内容在文件里重复出现时，门是【不放行】的，这里也得算成没被盖住。
+  # ⚠ 这里的"被几条盖住"就是数 _covering_entries 的输出行数 —— 与门同一份实现，
+  #   视图不可能与门对不上：指纹对得上但内容重复时，它和门一样拒绝放行（无输出）。
   _n_raw=0; _n_exempt=0; _n_bare=""; _n_over=""
   while IFS=$'\t' read -r _f _ln _rw _txt; do
     [ -n "$_f" ] && [ -n "$_ln" ] || continue
     _n_raw=$((_n_raw + 1))
-    _h=$(_sha256 <<<"$_txt")
-    _dup=$(grep -cFx -e "$_txt" -- "$_f" 2>/dev/null) || _dup=0
     _c=0
-    [ "${_dup:-0}" = 1 ] || continue   # 内容不唯一 → 门不放行 → 这里算 0 处
-    for a in "${ALLOW_PATTERNS[@]}"; do
-      printf '%s' "$_f" | grep -qE "${a%%$'\t'*}" 2>/dev/null || continue
-      rest=${a#*$'\t'}; hashes=${rest%%$'\t'*}
-      for one in $(printf '%s' "$hashes" | tr ',' ' '); do
-        [ "$one" = "$_h" ] && _c=$((_c + 1)) && break
-      done
-    done
+    while IFS= read -r _one; do
+      [ -n "$_one" ] && _c=$((_c + 1))
+    done < <(_covering_entries "$_f" "$_ln" "$_txt" 2>/dev/null)
     if [ "$_c" -gt 0 ]; then _n_exempt=$((_n_exempt + 1)); fi
     [ "$_c" -eq 0 ] && _n_bare="$_n_bare ${_f}:${_ln}"
     [ "$_c" -gt 1 ] && _n_over="$_n_over ${_f}:${_ln}"
