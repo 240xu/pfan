@@ -175,7 +175,7 @@ active，但设备上没有档位 —— 判成成功就等于没做检查。
 | S2 | 删掉 `E -lt CAP` 那条 | 行为测试红 |
 | S4 | 把下界改回 `-lt 0` | 行为测试红（L1 的直接回归） |
 | S5 | 把 `sizeOf` 改回量自身 | `test_panel_split` 红 |
-| S7 | 往预装文件塞一条 `pfan@` | `sanitize.sh` 红 |
+| S7 | 往预装文件塞一条带用户名的远端目标（`<deploy user>@<host>`） | `sanitize.sh` 红 |
 
 外加：一次真实部署 + `smoke.sh` 全绿 + 面板浏览器复验。
 

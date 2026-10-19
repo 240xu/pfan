@@ -43,14 +43,16 @@ bash scripts/ci.sh || { echo "pre-push 拒绝：ci 未通过"; exit 1; }
 # ⚠ 必须把 ssh 的退出码显式接住：`set -e` 下，命令替换赋值的退出码就是 ssh 的
 # 退出码，机器不可达时整支钩子会在这里直接中止，下面那几行"打印原因 + 接受
 # PFAN_SKIP_SMOKE"就成了死代码（实测：rc=255、原因一个字不打印、flag 完全无效）。
-# PFAN_HOST 可覆盖（默认 192.168.1.10）。目标机只能经 Cloudflare SSH 隧道到达时，
-# 设成 ssh config 里的别名即可，例如 PFAN_HOST=pfan-tunnel（该别名自带 ProxyCommand）。
+# PFAN_HOST 可覆盖（默认是文档里的 LAN 占位地址）。目标机只能经 Cloudflare SSH
+# 隧道到达时，设成 ssh config 里的别名即可，例如 PFAN_HOST=pfan-tunnel（该别名自带
+# ProxyCommand）。部署账号由 PFAN_USER 覆盖（默认 pfan）。
 PFAN_HOST="${PFAN_HOST:-192.168.1.10}"
+PFAN_USER="${PFAN_USER:-pfan}"
 SSH_OPTS="-i $HOME/.ssh/pfan_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
 [ "$PFAN_HOST" = "192.168.1.10" ] || SSH_OPTS=""   # 别名由 ssh config 自己提供 ProxyCommand
 probe_rc=0
 # shellcheck disable=SC2086
-probe_err=$(ssh $SSH_OPTS pfan@"$PFAN_HOST" true 2>&1 >/dev/null) || probe_rc=$?
+probe_err=$(ssh $SSH_OPTS -l "$PFAN_USER" "$PFAN_HOST" true 2>&1 >/dev/null) || probe_rc=$?
 if [ "$probe_rc" -eq 0 ]; then
   echo "== pre-push: bash scripts/smoke.sh（机器可达）=="
   PFAN_HOST="$PFAN_HOST" bash scripts/smoke.sh || { echo "pre-push 拒绝：冒烟未通过"; exit 1; }

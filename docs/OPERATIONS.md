@@ -10,21 +10,24 @@
 
 - 控制面板后端 `pfanel` 监听 `0.0.0.0:8789`
   （核实：`server/pfanel.py` `_PORT = PFAN_PORT` 缺省 8789、`Server(("0.0.0.0", _PORT), H)`）
-- 公网入口 `https://pfan.example.com/pfan`
+- 公网入口 `https://pfan.example.com/pfan`（占位域名，不代表任何真实部署）
   —— **[未验证]** 「Cloudflare 隧道 → 本机回环，不经 ufw 外部 INPUT」这半句的隧道配置在
-  CF 侧，仓库内只能核实到 `scripts/smoke.sh` 对该 URL 的 GET 断言。
+  CF 侧，仓库内只能核实到 `scripts/smoke.sh` 对 `PFAN_API_BASE`（默认即该占位域名）的 GET 断言。
 - 开发/运维入口：SSH
-  - 别名：`~/.ssh/config` 里 `Host 192.168.1.10 fanhost`（`User pfan`、
+  - 别名：`~/.ssh/config` 里 `Host 192.168.1.10 fanhost`（`User <deploy user>`、
     `IdentityFile ~/.ssh/pfan_deploy_key`、`IdentitiesOnly yes`）
-  - 脚本**不用**别名：`scripts/deploy.sh` / `scripts/smoke.sh` 写死
-    `pfan@${PFAN_HOST:-192.168.1.10}` + `-i ~/.ssh/pfan_deploy_key`，换机器用 `PFAN_HOST` 覆盖
+  - 脚本**不用**别名：`scripts/deploy.sh` / `scripts/smoke.sh` 读
+    `${PFAN_USER:-pfan}` + `${PFAN_HOST:-192.168.1.10}`，密钥走 `-i ~/.ssh/pfan_deploy_key`；
+    换机器用 `PFAN_HOST`（部署账号用 `PFAN_USER`）覆盖。文档里的地址是 RFC1918 占位值，
+    真实部署必须显式设置这两个变量
 
 ## 常用检查
 
 ```bash
 bash scripts/ci.sh                # 开发机：静态检查 + 全部测试（= npm test）
 bash scripts/smoke.sh             # 实机只读冒烟；SSH 不可达直接 exit 1，从不 skip
-PFAN_HOST=<ip> bash scripts/smoke.sh   # 换目标机
+PFAN_HOST=<ip> PFAN_USER=<user> bash scripts/smoke.sh   # 换目标机/账号
+PFAN_API_BASE=https://<your-host> bash scripts/smoke.sh # 公网入口（§3）另配
 ```
 
 `smoke.sh` 允许的远端操作只有：GET / `systemctl show|is-active|is-enabled` / `cat` /
@@ -145,7 +148,7 @@ $B/opt/beszel/beszel_data/{index.html,styles.css,app.js,core.js,vendor/uPlot.*}
    ↑ 其余 13 个用 cp -a --parents，保留完整路径
 ```
 
-手工回滚（布局核对自恢复点 `/root/backups/pfan-deploy-<timestamp>` 的实际内容，
+手工回滚（布局核对自一次 `pfan-deploy-<timestamp>` 恢复点的实际内容，
 并已在目标机实操验证 —— 不再是 [未验证]）：
 
 ```bash
@@ -197,16 +200,19 @@ bash scripts/smoke.sh          # 回滚后必须全绿
 
 本仓库**即将公开**。翻转 visibility 之前必须满足：
 
-1. `scripts/sanitize.sh` **已实现且通过**（rc=0，5 条规则 / 26 条豁免 / 50 处被锚定的出现），
+1. `scripts/sanitize.sh` **已实现且通过**（rc=0，5 条规则 / 13 条豁免 / 30 处被锚定的出现），
    但覆盖面比本条原先列的窄 ——
    **token、记忆文档、`audit/`、隧道 UUID 无对应规则**（规则全清单与理由见本节末「发布门的覆盖范围」）。
-2. LAN 地址**未删除、已逐条豁免**（`scripts/sanitize.allow` 第 4 组「私网地址」）：本文档 4 处，
-   外加 `scripts/smoke.sh` 与 `scripts/deploy.sh` 各 1 处（`PFAN_HOST` 缺省值，两处必须一致）。
-   删不掉，理由见末注。豁免锚在**那一行的内容**上而不是行号上，所以这里刻意不写行号 ——
-   写了就会在下次改这份文档时过期（`bash scripts/sanitize.sh --allow-list` 可以反查当前是哪几行）。
+2. LAN 地址**未删除、已逐条豁免**（`scripts/sanitize.allow` 第 4 组「私网地址」）：本文档 6 处，
+   外加 `scripts/smoke.sh` 与 `scripts/deploy.sh` 各 1 处（`PFAN_HOST` 缺省值，两处必须一致）
+   等，共 27 处、11 个文件（完整清单用 `bash scripts/sanitize.sh --allow-list` 反查）。
+   公开前脱敏（2026-10-19）已把真实地址整体替换为 RFC1918 占位值，保留占位值是为了让
+   脚本缺省、文档示例、测试断言三处字面量同源；这是「有意的保留」而不是遗漏，理由见末注。
+   豁免锚在**那一行的内容**上而不是行号上，所以这里刻意不写行号 ——
+   写了就会在下次改这份文档时过期。
 3. `server/pfanel.py` 的 Origin 白名单已配置化（backlog ②⑤），不再硬编码 IP
    —— **状态：已完成**（`PFAN_ORIGIN_ALLOW` 环境变量可覆盖；
-   缺省 `DEFAULT_ORIGINS` 仍含本机 LAN IP，属预期缺省，测试断言缺省=生产值）
+   缺省 `DEFAULT_ORIGINS` 仍含 LAN 占位地址，属预期缺省；测试断言字面量与代码默认值一致）
 
 在 1、2 未全部满足前，**不得**把仓库改为 public。
 
@@ -248,7 +254,7 @@ sudo make -C /lib/modules/$(uname -r)/build M=/opt/pfanctl modules
 > 同步源码但**不**自动重建（重建涉及 rmmod 窗口，必须人来决定时机）：
 >
 > ```bash
-> scp -i ~/.ssh/pfan_deploy_key core/pfanctl/{pfanctl.c,Makefile} pfan@192.168.1.10:/tmp/
+> scp -i ~/.ssh/pfan_deploy_key core/pfanctl/{pfanctl.c,Makefile} <deploy user>@192.168.1.10:/tmp/
 > ssh ... 'sudo -n mv /tmp/pfanctl.c /tmp/Makefile /opt/pfanctl/'
 > ```
 
@@ -335,14 +341,17 @@ stat -c '%F %a' /dev/pfanctl     # 必须是 character special file 600
 
 `bash scripts/sanitize.sh --list` 是唯一的事实源 —— 它打印的就是扫描时用的那份，
 不是散文。当前编译出 **5 条规则**：私钥路径、macOS 用户目录、自有域名、
-带用户名的远端目标（account + host，含邮箱形态）、私网地址。另有 26 条豁免（共 50 处出现），
+带用户名的远端目标（account + host，含邮箱形态）、私网地址。另有 13 条豁免（共 30 处出现），
 在 `scripts/sanitize.allow` 里逐条钉死「文件 + 那一行内容的 sha256 指纹」并写了理由。
+2026-10-19 公开前脱敏之后，私钥路径与自有域名两类在本仓库已 0 命中（真实值已换成
+通用占位名与 RFC 2606 保留示例域名），带用户名远端目标的 3 处只存在于历史计划/设计
+文档；仍逐条豁免的私网地址 27 处全部为 RFC1918 占位值。
 
 **豁免为什么钉内容而不钉行号**（2026-10-16 改）：行号会被它上面的任何一次编辑挪动，于是
 任何无关的改动都会把门变红 —— 本分支上因为三处互不相关的改动红过三次，每次的修法都是手工
 重锚，而重锚正是「悄悄把覆盖面放大」的时机。指纹认内容：上下移动都不必改清单，而同一文件里
 新写的同类内容仍然照拦（`tests/shell/test_repo_hygiene.sh` 的 T25e/T25f 双向钉住这两头）。
-清单仍然【一份都不少】：26 条全部提交、逐条必要（删掉任何一条门就红）。
+清单仍然【一份都不少】：13 条全部提交、逐条必要（删掉任何一条门就红）。
 `bash scripts/sanitize.sh --allow-list` 是反向视图，把每条豁免当前放行的 `文件:行号` 逐条印出来，
 改完某一行之后照它重新取指纹即可，不必手工数行。
 
@@ -353,7 +362,9 @@ stat -c '%F %a' /dev/pfanctl     # 必须是 character special file 600
 - **隧道 UUID** —— 没有对应规则。目前仓库里也不存在 UUID 字面量，所以「没规则」
   暂时不构成实际暴露；一旦写进去，门不会拦。
 
-**LAN 地址为什么保留而不替换成占位符**：放行规则要和目标机上真跑的命令逐字一致，
-否则照文档操作的人会去放行一个错误的网段。`scripts/smoke.sh` 的 `PFAN_HOST` 缺省值还必须
-与 `scripts/deploy.sh` 的那个一致，否则冒烟探的是另一台机器。这是「故意留着」，
+**LAN 地址为什么以占位值保留**：公开版本里这些地址全部是 RFC1918 占位值（真实地址已从
+全部受控内容中移除，不存在于本仓库）。保留占位值是为了三处字面量同源、开箱可跑：
+`scripts/smoke.sh` 的 `PFAN_HOST` 缺省值必须与 `scripts/deploy.sh` 的那个一致，否则冒烟探的
+是另一台机器；文档示例与测试断言也锚在同一组字面量上。真实部署必须显式设置
+`PFAN_HOST` / `PFAN_USER`（见 README「Deploy」）。这是「故意留下的占位值」，
 不是遗漏 —— 判断依据是 `scripts/sanitize.allow` 第 4 组逐条写着的理由。

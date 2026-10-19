@@ -2,6 +2,7 @@
 
 导入 pfanel 前必须给平台配置，否则模块级加载会按设计快速失败（P1 的 I4 修复）。
 """
+
 import builtins
 import json
 import os
@@ -12,8 +13,13 @@ from urllib.error import HTTPError
 
 os.environ.setdefault(
     "PFAN_PLATFORM_CONF",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
-                 "platform", "platform.conf.example"),
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "platform",
+        "platform.conf.example",
+    ),
 )
 
 import tempfile  # noqa: E402
@@ -50,14 +56,23 @@ def test_state_seam_defaults_equal_production():
     # 格式化器悄悄废掉安全守卫，比没有守卫更危险。解析 AST 后折行/改引号都影响不到它。
     import ast as _ast
     import inspect
+
     tree = _ast.parse(inspect.getsource(pfanel))
     found = {}
     for node in _ast.walk(tree):
-        if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute)
-                and node.func.attr == "get" and len(node.args) >= 2):
+        if (
+            isinstance(node, _ast.Call)
+            and isinstance(node.func, _ast.Attribute)
+            and node.func.attr == "get"
+            and len(node.args) >= 2
+        ):
             a0, a1 = node.args[0], node.args[1]
-            if (isinstance(a0, _ast.Constant) and isinstance(a1, _ast.Constant)
-                    and isinstance(a0.value, str) and a0.value.startswith("PFAN_")):
+            if (
+                isinstance(a0, _ast.Constant)
+                and isinstance(a1, _ast.Constant)
+                and isinstance(a0.value, str)
+                and a0.value.startswith("PFAN_")
+            ):
                 found.setdefault(a0.value, a1.value)
     expected = {
         "PFAN_DB": "/var/lib/pfanel/pfanel.db",
@@ -66,26 +81,32 @@ def test_state_seam_defaults_equal_production():
         "PFAN_CONF": "/etc/pfand.conf",
         "PFAN_LOCK": "/run/pfanel.lock",
         "PFAN_DMESG": "dmesg",
-      }
+    }
     # PFAN_PANEL_DIR 的缺省不是字面量，而是 _PLAT.get("PANEL_DIR", <兜底>) ——
     # 面板部署路径改成从 platform.conf 派生（单一事实源：deploy.sh / smoke.sh /
     # pfanel.py 三处同源），所以这里不能按字面量比对，改为断言两件事：
     #   ① 源码确实从 _PLAT 取；② platform.conf 里声明了它（缺了会落回代码兜底值）。
     _src = inspect.getsource(pfanel)
     assert '_PLAT.get("PANEL_DIR"' in _src, (
-        "PFAN_PANEL_DIR 的缺省不再来自 platform.conf —— 面板路径会有第二个事实源")
+        "PFAN_PANEL_DIR 的缺省不再来自 platform.conf —— 面板路径会有第二个事实源"
+    )
     assert pfan_platform.get("PANEL_DIR", default=None) is not None, (
-        "platform.conf 没有声明 PANEL_DIR —— 派生会落回代码里的兜底值")
+        "platform.conf 没有声明 PANEL_DIR —— 派生会落回代码里的兜底值"
+    )
     for k, want in expected.items():
         assert k in found, f"源码里找不到 {k} 的缺省值（接缝被删了？）"
         assert found[k] == want, f"{k} 缺省值不是生产值: {found[k]!r}，期望 {want!r}"
     # PFAN_DEV 是三层回退（环境变量 -> 平台配置 -> 字面兜底），
     # 兜底值来自平台配置，所以断言平台配置里写的 DEV 才是真正的"生产值"。
-    assert 'os.environ.get("PFAN_DEV", "")' in inspect.getsource(pfanel), "PFAN_DEV 接缝缺失"
-    with open(os.path.join(_REPO, "platform", "platform.conf.example"), encoding="utf-8") as fh:
-        assert any(line.strip() == "DEV=/dev/pfanctl" for line in fh), \
+    assert 'os.environ.get("PFAN_DEV", "")' in inspect.getsource(pfanel), (
+        "PFAN_DEV 接缝缺失"
+    )
+    with open(
+        os.path.join(_REPO, "platform", "platform.conf.example"), encoding="utf-8"
+    ) as fh:
+        assert any(line.strip() == "DEV=/dev/pfanctl" for line in fh), (
             "平台配置里的 DEV 不是 /dev/pfanctl（生产值变了？）"
-
+        )
 
 
 def _serve(port=0):
@@ -101,8 +122,9 @@ def _serve(port=0):
 
 # ---------------- ②⑤ Origin 白名单 ----------------
 
+
 def test_origin_default_allowlist_matches_production():
-    """缺省白名单必须等于当前生产值（P1 里硬编码的那一组）。"""
+    """缺省白名单必须等于仓库里的缺省字面量（公开版本是占位域名 + RFC1918 示例地址）。"""
     assert pfanel.DEFAULT_ORIGINS == "pfan.example.com,127.0.0.1,localhost,192.168.1.10"
 
 
@@ -125,13 +147,15 @@ def test_origin_allowlist_is_configurable():
     try:
         assert pfanel.origin_allowed("https://a.example")
         assert pfanel.origin_allowed("http://b.example:8789")
-        assert not pfanel.origin_allowed("http://192.168.1.10:8789"), \
+        assert not pfanel.origin_allowed("http://192.168.1.10:8789"), (
             "改了白名单却仍放行旧值 —— 说明没真用环境变量"
+        )
     finally:
         del os.environ["PFAN_ORIGIN_ALLOW"]
 
 
 # ---------------- ②⑦ CORS ----------------
+
 
 def test_api_has_no_wildcard_cors():
     """②⑦：面板是同源的，`Access-Control-Allow-Origin: *` 只会让任意网页跨域读遥测。"""
@@ -160,6 +184,7 @@ def test_api_still_serves_json_shape():
 
 # ---------------- ⑯ daemon_threads ----------------
 
+
 def test_server_has_daemon_threads():
     """⑯：ThreadingTCPServer 默认 daemon_threads=False，shutdown 会被挂住的 handler 卡住。"""
     assert pfanel.Server.daemon_threads is True
@@ -172,7 +197,10 @@ def test_unauthorized_post_is_still_rejected():
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/level",
             data=b'{"level":50}',
-            headers={"Content-Type": "application/json", "Origin": "http://evil.example"},
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "http://evil.example",
+            },
             method="POST",
         )
         try:
@@ -228,6 +256,7 @@ def test_snapshot_fps_not_null_for_valid_level():
         assert body["fps"] is not None, f"②⑥: level=42 时 fps 仍为 null"
         assert isinstance(body["fps"], list) and len(body["fps"]) == 3
         import pfan_core
+
         assert tuple(body["fps"]) == pfan_core.FPS[40], "42 应吸附到 40 档的表项"
         # 注意 rpm 不在这里断言：它来自 EC 传感字节 est_rpm(ec76)，与档位无关，
         # 而假设备给不出有意义的 ec76（这正是 ②⑥ 的 fps 与 rpm 本就不同源的体现）。
@@ -239,6 +268,7 @@ def test_snapshot_fps_not_null_for_valid_level():
 def test_curve_view_uses_shared_fps_table():
     """②⑧：curve_view 曾自带一份缺 85/90/95 的 rpm 表，与 pfan_core.FPS 分歧。"""
     import pfan_core
+
     with open(os.environ["PFAN_CONF"], "w", encoding="utf-8") as fh:
         fh.write(_CURVE_CONF)
     srv, port = _serve()
@@ -252,12 +282,15 @@ def test_curve_view_uses_shared_fps_table():
             if lvl is None:
                 continue
             rpm = b.get("rpm")
-            assert rpm == pfan_core.nearest_fps(lvl)[0], \
+            assert rpm == pfan_core.nearest_fps(lvl)[0], (
                 f"band level={lvl} rpm={rpm} 与 pfan_core.FPS 不一致"
+            )
         # 直接断言表本身不再局部定义
         import inspect
-        assert "FPS = {25:3200" not in inspect.getsource(pfanel.curve_view), \
+
+        assert "FPS = {25:3200" not in inspect.getsource(pfanel.curve_view), (
             "curve_view 仍在用局部 FPS 表"
+        )
     finally:
         srv.shutdown()
         srv.server_close()
@@ -267,6 +300,7 @@ def test_curve_view_uses_shared_fps_table():
 # SECURITY.md 承诺「写接口必须带 X-Pfan-Token」，但代码曾是 `token 或 Origin 白名单`：
 # Origin 只比对主机名、忽略端口与协议 → 同主机【任意端口】上的页面都能免 token 写。
 # 面板始终注入 token（app.js 顶层的 TOKEN 占位符），这条宽限没有存在理由。
+
 
 def _post(port, token=None, origin=None, level=50):
     req = urllib.request.Request(
@@ -290,12 +324,15 @@ def test_write_requires_token_even_from_allowed_origin():
     """C1：白名单 Origin 不能替代 token —— 主机名匹配会放过同主机任意端口的页面。"""
     srv, port = _serve()
     try:
-        assert _post(port, token=None, origin="http://localhost:9999") == 403, \
+        assert _post(port, token=None, origin="http://localhost:9999") == 403, (
             "无 token + localhost Origin 竟然放行了（主机名匹配，端口被忽略）"
-        assert _post(port, token=None, origin="http://192.168.1.10:8080") == 403, \
+        )
+        assert _post(port, token=None, origin="http://192.168.1.10:8080") == 403, (
             "无 token + 本机任意端口 Origin 竟然放行了"
-        assert _post(port, token=None, origin="https://pfan.example.com") == 403, \
+        )
+        assert _post(port, token=None, origin="https://pfan.example.com") == 403, (
             "无 token + 白名单 Origin 竟然放行了"
+        )
         assert _post(port, token=None) == 403, "无 token 必须 403"
     finally:
         srv.shutdown()
@@ -344,11 +381,14 @@ def test_acpi_refuses_to_create_missing_node():
     if os.path.exists(target):
         os.unlink(target)
     saved_dev = pfanel.DEV
-    had = os.environ.pop("PFAN_DEV", None)   # 摘掉测试接缝 → 走生产判定（必须是字符设备）
+    had = os.environ.pop(
+        "PFAN_DEV", None
+    )  # 摘掉测试接缝 → 走生产判定（必须是字符设备）
     pfanel.DEV = target
     try:
-        assert pfanel.acpi("_SB.PCI0.LPCB.EC0.TFN1._FST") is None, \
+        assert pfanel.acpi("_SB.PCI0.LPCB.EC0.TFN1._FST") is None, (
             "缺节点时应拒绝并返回 None，而不是继续写"
+        )
         assert not os.path.exists(target), "acpi 凭空创建了普通文件: %s" % target
     finally:
         pfanel.DEV = saved_dev
@@ -362,8 +402,9 @@ def test_write_with_valid_token_is_accepted():
         tok = pfanel.get_token()
         assert tok, "拿不到 token，无法验证放行路径"
         # 带白名单 Origin（面板就是这样发的）
-        assert _post(port, token=tok, origin="http://127.0.0.1:%d" % port) == 200, \
+        assert _post(port, token=tok, origin="http://127.0.0.1:%d" % port) == 200, (
             "有效 token + 自身 Origin 应放行"
+        )
         # 不带 Origin（curl）
         assert _post(port, token=tok) == 200, "有效 token 无 Origin 应放行"
     finally:
@@ -376,14 +417,16 @@ def test_write_with_valid_token_but_foreign_origin_is_rejected():
     srv, port = _serve()
     try:
         tok = pfanel.get_token()
-        assert _post(port, token=tok, origin="http://evil.example") == 403, \
+        assert _post(port, token=tok, origin="http://evil.example") == 403, (
             "有效 token 但陌生 Origin 应被白名单拒绝"
+        )
     finally:
         srv.shutdown()
         srv.server_close()
 
 
 # ---------------- I2: ACAO 头必须【完全不存在】 ----------------
+
 
 def test_api_must_not_send_any_acao_header():
     """C2/②⑦：只断言 != '*' 会放过反射型 ACAO（浏览器同样可跨域读）。"""
@@ -406,14 +449,18 @@ def test_api_must_not_send_any_acao_header():
 # 只断言类属性 `Server.daemon_threads is True` 不够：把 __main__ 改回裸
 # socketserver.ThreadingTCPServer(...)，缺陷原样回来而测试全绿。
 
+
 def test_main_instantiates_the_daemon_server():
     import inspect
+
     src = inspect.getsource(pfanel)
-    main = src[src.index('if __name__ == "__main__":'):]
-    assert "with Server((" in main, \
+    main = src[src.index('if __name__ == "__main__":') :]
+    assert "with Server((" in main, (
         "__main__ 没有实例化 pfanel.Server —— daemon_threads 形同虚设"
-    assert "socketserver.ThreadingTCPServer((" not in main, \
+    )
+    assert "socketserver.ThreadingTCPServer((" not in main, (
         "__main__ 用回了裸 ThreadingTCPServer（daemon_threads=False，shutdown 会挂住）"
+    )
 
 
 # ---------------- 专家审计 C2：还原持久化状态时 free 曲线不得把风扇留在 0 ----------------
@@ -437,6 +484,7 @@ def test_free_curve_must_not_break_persisted_state_restore():
     # 持久化用例合计 ~58s，R-15）；只换上 systemctl 后假设备照常应答，这条用例
     # 也第一次真的走到了"设备确认写入"那一侧。要验的是"档位有没有被恢复"，不是服务管理。
     import subprocess as _sp
+
     _real = _sp.run
     _sp.run = _systemctl_stub("inactive", _real)
     # 同理：/var/log 在本机不存在（生产机有），日志写不出去不该算缺陷
@@ -455,7 +503,7 @@ def test_free_curve_must_not_break_persisted_state_restore():
     dev = os.environ["PFAN_DEV"]
     open(dev, "w").close()
     try:
-        pfanel.apply_persisted_state()   # 抛异常本身就是缺陷
+        pfanel.apply_persisted_state()  # 抛异常本身就是缺陷
     finally:
         pfanel._APPLIED = False
         _sp.run = _real
@@ -463,6 +511,7 @@ def test_free_curve_must_not_break_persisted_state_restore():
     writes = [l for l in open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l]
     assert writes, "free 曲线还原时一个 _FSL 都没写 —— 异常发生在恢复档位之前"
     import re as _re
+
     final = _re.search(r"_FSL 1 (\d+)", writes[-1])
     assert final and int(final.group(1)) == 40, (
         "free 曲线还原后最终档位应是已存档的 40，实际=%r（0 = 停转）" % (writes[-1],)
@@ -477,6 +526,7 @@ def test_free_curve_must_not_break_persisted_state_restore():
 # 上一条（test_free_curve_must_not_break_persisted_state_restore）只覆盖 level=40
 # （有意的非零档位）；这一组补的是"值根本不可用"的那一支。缺省值那一支 —— level 压根是 0，
 # 也就是从没按过档位按钮的【默认状态】—— 旧实现是掉进"无可恢复"的。
+
 
 def test_persisted_state_with_zero_level_falls_back_not_stops():
     """level=0 不是"有意的 0"，而是"从没按过档位按钮"的默认状态（见 get_state() 的 d.get("level", 0)）。
@@ -493,24 +543,30 @@ def test_persisted_state_with_zero_level_falls_back_not_stops():
     open(dev, "w").close()
     import builtins as _b
     import subprocess as _sp
+
     _real_run, _real_open = _sp.run, _b.open
     _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
         _real_open(os.path.join(os.path.dirname(dev), "pfanel.log"), "a")
-        if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
     try:
         pfanel.apply_persisted_state()
     finally:
         _sp.run = _real_run
         pfanel.open = _real_open
         pfanel._APPLIED = False
-    writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
-              if "_FSL" in l]
+    writes = [
+        l for l in _real_open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l
+    ]
     assert writes, "free 曲线一个 _FSL 都没写 —— 设备停在先前状态"
     import re as _re
+
     last = _re.findall(r"_FSL 1 (\d+)", writes[-1])
     assert last and int(last[-1]) >= 25, (
-        "level=0 时最终档位是 %r，必须回落到 >=25 的安全下限而不是 0" % (last[-1] if last else None,)
+        "level=0 时最终档位是 %r，必须回落到 >=25 的安全下限而不是 0"
+        % (last[-1] if last else None,)
     )
 
 
@@ -524,14 +580,14 @@ def test_get_state_missing_level_key_is_zero_and_explicit_null_is_none():
     """
     curve_file = os.environ["PFAN_CURVE_FILE"]
     with open(curve_file, "w", encoding="utf-8") as fh:
-        json.dump({"curve": "free"}, fh)      # 没有 level 键
+        json.dump({"curve": "free"}, fh)  # 没有 level 键
     st = pfanel.get_state()
     assert st["level"] == 0 and st["level"] is not None, (
         "缺 level 键时 get_state 给出 %r —— 缺键必须与 level=0 同路；"
         "给 None 会把“没按过档位”误判成 TypeError 分支" % (st["level"],)
     )
     with open(curve_file, "w", encoding="utf-8") as fh:
-        json.dump({"curve": "free", "level": None}, fh)   # 显式 null
+        json.dump({"curve": "free", "level": None}, fh)  # 显式 null
     assert pfanel.get_state()["level"] is None, (
         "显式 null 必须原样保留为 None —— 它是 int(None) TypeError 分支唯一的触发输入"
     )
@@ -563,15 +619,19 @@ def test_persisted_state_with_null_level_falls_back_not_stops():
     _real_run, _real_open = _sp.run, _b.open
     _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
-        _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
     try:
         pfanel.apply_persisted_state()
     finally:
         _sp.run = _real_run
         pfanel.open = _real_open
         pfanel._APPLIED = False
-    writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
-              if "_FSL" in l]
+    writes = [
+        l for l in _real_open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l
+    ]
     last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
     assert last and int(last[-1]) == 25, (
         "level=null 时最终档位是 %r，必须与 level=0 同类回落到 25 而不是 0（0 = 停转）"
@@ -671,23 +731,27 @@ def test_persisted_state_with_bool_level_falls_back_not_stops():
     _real_run, _real_open = _sp.run, _b.open
     _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
-        _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
     try:
         pfanel.apply_persisted_state()
     finally:
         _sp.run = _real_run
         pfanel.open = _real_open
         pfanel._APPLIED = False
-    writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
-              if "_FSL" in l]
+    writes = [
+        l for l in _real_open(dev, encoding="utf-8").read().splitlines() if "_FSL" in l
+    ]
     last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
     assert last and int(last[-1]) == 25, (
         "level=true 时最终档位是 %r，必须回落到 25 而不是 1（1 档离停转只差一步）"
         % (last[-1] if last else None,)
     )
     logtext = _real_open(log, encoding="utf-8").read()
-    assert "还原失败" not in logtext, (
-        "bool 不该走 except 也不该停转，日志=%r" % (logtext,)
+    assert "还原失败" not in logtext, "bool 不该走 except 也不该停转，日志=%r" % (
+        logtext,
     )
     assert "True" in logtext and "回落" in logtext, (
         "回落既要写进日志、也要带上坏值本身：%r" % (logtext,)
@@ -713,7 +777,10 @@ def test_persisted_state_with_non_finite_float_level_falls_back_not_stops():
     _real_run, _real_open = _sp.run, _b.open
     _sp.run = _systemctl_stub("inactive", _real_run)
     pfanel.open = lambda p, *a, **k: (
-        _real_open(log, "a") if str(p) == "/var/log/pfanel.log" else _real_open(p, *a, **k))
+        _real_open(log, "a")
+        if str(p) == "/var/log/pfanel.log"
+        else _real_open(p, *a, **k)
+    )
     try:
         for raw, label in ((float("nan"), "NaN"), (float("inf"), "Infinity")):
             pfanel._APPLIED = False
@@ -722,22 +789,32 @@ def test_persisted_state_with_non_finite_float_level_falls_back_not_stops():
             open(dev, "w").close()
             open(log, "w").close()
             pfanel.apply_persisted_state()  # 抛异常本身就是缺陷
-            writes = [l for l in _real_open(dev, encoding="utf-8").read().splitlines()
-                      if "_FSL" in l]
+            writes = [
+                l
+                for l in _real_open(dev, encoding="utf-8").read().splitlines()
+                if "_FSL" in l
+            ]
             last = _re.findall(r"_FSL 1 (\d+)", writes[-1]) if writes else []
             assert last and int(last[-1]) == 25, (
                 "level=%s 时最终档位是 %r，必须回落到 25 而不是 0（0 = 停转）"
-                % (label, last[-1] if last else None,)
+                % (
+                    label,
+                    last[-1] if last else None,
+                )
             )
             logtext = _real_open(log, encoding="utf-8").read()
             assert "还原失败" not in logtext, (
                 "int(%s) 抛的异常冒进了外层 except，日志=%r"
-                % (label, logtext,)
+                % (
+                    label,
+                    logtext,
+                )
             )
     finally:
         _sp.run = _real_run
         pfanel.open = _real_open
         pfanel._APPLIED = False
+
 
 # ---------------- Task 3：set_curve 切 s0i3 必须确认守护真的起来了 ----------------
 # 旧 set_curve 丢弃 systemctl 的退出码就往下走：守护没起来（内核模块没加载、
@@ -990,7 +1067,7 @@ def test_rollback_that_raises_still_leaves_a_non_stopping_level_and_a_log():
     )
     pfanel._daemon_ready = lambda *a, **k: False
     try:
-        got = pfanel.set_curve("s0i3")   # 抛出去本身就是缺陷
+        got = pfanel.set_curve("s0i3")  # 抛出去本身就是缺陷
     finally:
         _sp.run = _real_run
         pfanel.open = _real_open
@@ -1009,8 +1086,8 @@ def test_rollback_that_raises_still_leaves_a_non_stopping_level_and_a_log():
         "回滚失败必须如实记录；写成【已回滚到 cool】是一条事后没人能核对的谎：%r"
         % (logtext,)
     )
-    assert "回滚未完成" in got, (
-        "返回值必须带出【回滚没完成】，不能谎称已回滚：%r" % (got,)
+    assert "回滚未完成" in got, "返回值必须带出【回滚没完成】，不能谎称已回滚：%r" % (
+        got,
     )
 
 
@@ -1143,9 +1220,13 @@ def test_min_safe_level_is_derived_from_the_shared_floor_not_a_third_copy():
         n
         for n in tree.body
         if isinstance(n, _ast.Assign)
-        and any(isinstance(t, _ast.Name) and t.id == "MIN_SAFE_LEVEL" for t in n.targets)
+        and any(
+            isinstance(t, _ast.Name) and t.id == "MIN_SAFE_LEVEL" for t in n.targets
+        )
     ]
-    assert len(assigns) == 1, "MIN_SAFE_LEVEL 的模块级赋值应恰好一处，实际 %d" % len(assigns)
+    assert len(assigns) == 1, "MIN_SAFE_LEVEL 的模块级赋值应恰好一处，实际 %d" % len(
+        assigns
+    )
     rhs = assigns[0].value
     assert isinstance(rhs, _ast.Name) and rhs.id == "L0_MIN", (
         "MIN_SAFE_LEVEL 的右端是 %s 而不是 L0_MIN —— 这是又一份会漂移的硬编码副本"
@@ -1186,7 +1267,7 @@ def test_auto_fallback_writes_the_min_safe_level_constant():
     # get_ec76 这里【不打桩】：夹具已改成生产形状（EC 读回裸整数），auto 分支刚写过
     # `_FSL 1 0` 所以记住的档位是 0，真解析读回来的就是 0 -> 必须兜底。
     # 曾经这里是 `lambda: 0`，于是整条兜底路径一次都没跑过真解析。
-    pfanel.MIN_SAFE_LEVEL = 33         # 故意与 25 不同
+    pfanel.MIN_SAFE_LEVEL = 33  # 故意与 25 不同
     pfanel.open = lambda p, *a, **k: (
         _real_open(log, "a")
         if str(p) == "/var/log/pfanel.log"
@@ -1202,7 +1283,8 @@ def test_auto_fallback_writes_the_min_safe_level_constant():
     assert got == "auto"
     last = _last_fsl(dev)
     assert last == 33, (
-        "auto 的兜底写的是 %r 而不是 MIN_SAFE_LEVEL(33) —— 说明那行仍是硬编码字面量" % (last,)
+        "auto 的兜底写的是 %r 而不是 MIN_SAFE_LEVEL(33) —— 说明那行仍是硬编码字面量"
+        % (last,)
     )
 
 
@@ -1306,7 +1388,8 @@ def test_firmware_curves_never_wait_for_the_daemon():
             )
             st = pfanel.get_state()
             assert st["curve"] == want, (
-                "请求 %r 却把 %r 持久化了 —— 固件接管被换成了另一种曲线" % (want, st["curve"])
+                "请求 %r 却把 %r 持久化了 —— 固件接管被换成了另一种曲线"
+                % (want, st["curve"])
             )
             assert not calls, (
                 "%s 分支调用了 _daemon_ready —— 这条曲线上守护本来就该是停的，"
@@ -1404,7 +1487,7 @@ def test_daemon_ready_never_starts_an_attempt_past_the_budget():
 
         def _run(*a, **k):
             attempts.append(clock.t)
-            return _Proc("inactive\n")      # 永不 active -> 循环只受预算支配
+            return _Proc("inactive\n")  # 永不 active -> 循环只受预算支配
 
         pfanel.time = clock
         pfanel.get_ec76 = lambda: None
@@ -1417,11 +1500,14 @@ def test_daemon_ready_never_starts_an_attempt_past_the_budget():
             pfanel.time = _real_time
         deadline = 1000.0 + timeout_s
         assert attempts, "(%s,%s) 一次都没试过 —— 那是【没检查】不是【未就绪】" % (
-            timeout_s, interval)
+            timeout_s,
+            interval,
+        )
         assert max(attempts) < deadline, (
             "有一次 systemctl 发起于 t=%r，已经在 deadline=%r 之外或正好压线"
             "（timeout=%s, interval=%s）—— 预算用完之后还发起的尝试，"
-            "它的整次成本都落在预算之外" % (max(attempts), deadline, timeout_s, interval)
+            "它的整次成本都落在预算之外"
+            % (max(attempts), deadline, timeout_s, interval)
         )
         assert got is False, "守护全程 inactive 却判成就绪：%r" % (got,)
         assert len(attempts) == want, (
@@ -1561,8 +1647,7 @@ def test_auto_handover_success_needs_no_fallback_write():
     reqs = _device_requests()
     fallback = "_FSL 1 %d" % pfanel.MIN_SAFE_LEVEL
     assert not [r for r in reqs if r.endswith(fallback)], (
-        "EC=44 时设备上仍然收到了 %s —— 成功侧多写了一次兜底档位：%r"
-        % (fallback, reqs)
+        "EC=44 时设备上仍然收到了 %s —— 成功侧多写了一次兜底档位：%r" % (fallback, reqs)
     )
     assert [r for r in reqs if r.endswith("_FSL 1 0")], (
         "整次切换连交回本身的 _FSL 1 0 都没写出去，本用例什么也没验到：%r" % (reqs,)
@@ -1619,8 +1704,7 @@ def test_cool_handover_success_needs_no_fallback_write():
     reqs = _device_requests()
     fallback = "_FSL 1 %d" % pfanel.MIN_SAFE_LEVEL
     assert not [r for r in reqs if r.endswith(fallback)], (
-        "EC=44 时设备上仍然收到了 %s —— 成功侧多写了一次兜底档位：%r"
-        % (fallback, reqs)
+        "EC=44 时设备上仍然收到了 %s —— 成功侧多写了一次兜底档位：%r" % (fallback, reqs)
     )
     assert [r for r in reqs if r.endswith("_FSL 1 0")], (
         "整次切换连交回本身的 _FSL 1 0 都没写出去，本用例什么也没验到：%r" % (reqs,)
@@ -1656,7 +1740,7 @@ def test_firmware_curve_handover_waits_before_its_first_ec_read():
     def _acpi(path, args=""):
         if str(path) == pfanel.EC88 and "118" in str(args):
             events.append(("ec76", args))
-            return "11264"          # 44 << 8：真解析也认这个形状
+            return "11264"  # 44 << 8：真解析也认这个形状
         return _real_acpi(path, args)
 
     open(dev, "w").close()
@@ -1692,6 +1776,8 @@ def test_firmware_curve_handover_waits_before_its_first_ec_read():
         "第一读之前最长只等了 %rs，越出 [1.0, 5.0] —— 等得不够久等于没等；"
         "事件=%r" % (max(waits), events)
     )
+
+
 # ---------------- R-02：free 的起点不许是 _FSL 0（F2 的活体孪生） ----------------
 # 实测（2026-10-17，HEAD）：POST /api/profile {"profile":"free"} 先 stop pfand，
 # 再写 `_FSL 1 0` + EC88 s0i3 就返回 —— s0i3 下 0 就是停转，守护已停、没有任何
@@ -1779,8 +1865,8 @@ def test_free_curve_starts_from_the_current_level_not_stop():
     assert not dropped, "正常侧不该丢弃任何 0x79 写"
     assert got == "free" and pfanel.get_state()["curve"] == "free"
     assert fsl, "free 切换一个 _FSL 都没写 —— 本用例什么也没验到"
-    assert 0 not in fsl, (
-        "free 交回写了 _FSL 0（= 停转，而守护已停、没有后验）: %r" % (fsl,)
+    assert 0 not in fsl, "free 交回写了 _FSL 0（= 停转，而守护已停、没有后验）: %r" % (
+        fsl,
     )
     assert fsl[0] == 50, (
         "free 的起点档位应是【当前档位 50】，实际 %r —— 写死下限会把用户档位压成 25"
@@ -1927,8 +2013,13 @@ def test_guard_rolls_back_at_the_threshold_and_only_for_guarded_curves():
         # 用 getattr：本文件其它用例把 pfanel.open 留在模块上，但单独跑本用例时
         # 它并不存在 —— 直接取 pfanel.open 会在 -k 单跑时 AttributeError（本文件
         # 自己就踩过一次），那是测试互染，不是被测行为。
-        real = (pfanel.get_curve, pfanel.get_temp, pfanel.set_curve, pfanel.log_event,
-                getattr(pfanel, "open", builtins.open))
+        real = (
+            pfanel.get_curve,
+            pfanel.get_temp,
+            pfanel.set_curve,
+            pfanel.log_event,
+            getattr(pfanel, "open", builtins.open),
+        )
         pfanel.get_curve = lambda: curve
         pfanel.get_temp = lambda: (temps.append(temp), temp)[1]
         pfanel.set_curve = lambda name: calls.append(name)
@@ -1941,8 +2032,13 @@ def test_guard_rolls_back_at_the_threshold_and_only_for_guarded_curves():
         try:
             got = pfanel.guard()
         finally:
-            (pfanel.get_curve, pfanel.get_temp, pfanel.set_curve, pfanel.log_event,
-             _ret) = real
+            (
+                pfanel.get_curve,
+                pfanel.get_temp,
+                pfanel.set_curve,
+                pfanel.log_event,
+                _ret,
+            ) = real
             if _had_open:
                 pfanel.open = _ret
             else:
@@ -1954,7 +2050,8 @@ def test_guard_rolls_back_at_the_threshold_and_only_for_guarded_curves():
     for curve in pfanel.GUARDED:
         got, calls, _t = _probe(curve, 90.0)
         assert calls == ["auto"], (
-            "受管曲线 %s 在 90.0C 没有回退（动作被删/阈值被改）：calls=%r" % (curve, calls)
+            "受管曲线 %s 在 90.0C 没有回退（动作被删/阈值被改）：calls=%r"
+            % (curve, calls)
         )
         assert got == 90.0, "guard 触发时应返回触发温度：%r" % (got,)
 
@@ -1962,7 +2059,9 @@ def test_guard_rolls_back_at_the_threshold_and_only_for_guarded_curves():
     assert calls == [], "81.9C（低于 GUARD_TEMP）触发了回退：calls=%r" % (calls,)
 
     _got, calls, _t = _probe("quiet", float(pfanel.GUARD_TEMP))
-    assert calls == ["auto"], "恰好 GUARD_TEMP 时必须触发（>= 语义）：calls=%r" % (calls,)
+    assert calls == ["auto"], "恰好 GUARD_TEMP 时必须触发（>= 语义）：calls=%r" % (
+        calls,
+    )
 
     for curve in ("auto", "cool"):
         _got, calls, _t = _probe(curve, 95.0)
@@ -1981,7 +2080,6 @@ def test_guard_rolls_back_at_the_threshold_and_only_for_guarded_curves():
     # 交回后读 EC 的等稳时间：固件接管不是瞬时的（1.0s 下界）；
     # 5.0s 上界是延迟预算 —— 0.001 这类值实测蒙过整个套件。
     assert 1.0 <= pfanel.HANDOVER_SETTLE_S <= 5.0, (
-        "HANDOVER_SETTLE_S=%r 越出 [1.0,5.0] —— 等得不够久等于没等" % (
-            pfanel.HANDOVER_SETTLE_S,
-        )
+        "HANDOVER_SETTLE_S=%r 越出 [1.0,5.0] —— 等得不够久等于没等"
+        % (pfanel.HANDOVER_SETTLE_S,)
     )

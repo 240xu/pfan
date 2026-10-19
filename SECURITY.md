@@ -24,7 +24,7 @@
 - **Origin 白名单**（`PFAN_ORIGIN_ALLOW`，默认 `pfan.example.com,127.0.0.1,localhost,192.168.1.10`）
   是 token 之上的**第二道门（纵深防御）**：请求**带了** `Origin` 时还必须在白名单里，否则 403。
   白名单**只比对主机名**（scheme 与端口一律忽略）—— 这正是它不能当鉴权用的原因，
-  也是旧版二选一规则的漏洞所在。白名单值由 `tests/python/test_http.py` 断言等于生产值，
+  也是旧版二选一规则的漏洞所在。白名单缺省字面量由 `tests/python/test_http.py` 断言，
   改配置是可选的。
 - **不发 CORS 头**。面板与 API 同源，通配 `Access-Control-Allow-Origin: *` 只会让
   LAN 内任意网页跨域读遥测 —— 已移除，`scripts/smoke.sh` 2b 段守着。

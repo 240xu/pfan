@@ -62,7 +62,9 @@ CURVES = {
     "free": None,  # 自由模式：停守护，档位完全由用户定（仍需 s0i3 才生效）
 }
 # 静态面板目录（部署路径，非硬件平台路径）。可用 PFAN_PANEL_DIR 覆盖以便测试/迁移。
-PANEL_DIR = os.environ.get("PFAN_PANEL_DIR", _PLAT.get("PANEL_DIR", "/opt/beszel/beszel_data"))
+PANEL_DIR = os.environ.get(
+    "PFAN_PANEL_DIR", _PLAT.get("PANEL_DIR", "/opt/beszel/beszel_data")
+)
 # 随仓库一起部署的第三方资产（uPlot ESM + CSS）。
 # 面板过去从 cdn.jsdelivr.net 拉图表库：目标机是 LAN 设备，可能根本没有出口，
 # 那时 charts 会静默缺席而页面其余部分照常工作 —— 极难归因的"半坏"状态。
@@ -631,9 +633,12 @@ def apply_persisted_state():
                     _lv = 0
             if _lv < 1:
                 _lv = MIN_SAFE_LEVEL
-                log_note = "level 存档值 %r 不可用（缺失/非整数/负数/0）-> 回落下限 %d" % (
-                    _lv_raw,
-                    MIN_SAFE_LEVEL,
+                log_note = (
+                    "level 存档值 %r 不可用（缺失/非整数/负数/0）-> 回落下限 %d"
+                    % (
+                        _lv_raw,
+                        MIN_SAFE_LEVEL,
+                    )
                 )
             acpi(FSL, "1 %d" % _lv)
         with open("/var/log/pfanel.log", "a") as f:
@@ -866,7 +871,8 @@ def history(hours=24, limit=2000, curve_only=False):
 
 
 # ②⑤ 写接口的 CSRF 白名单 —— 可配置，不再是源码里的硬编码常量。
-# 缺省值必须【等于当前生产值】（tests/python/test_http.py 会断言），这样改配置才是可选的。
+# 缺省值是发布用的占位值（example 域名 + RFC1918 示例地址）；
+# tests/python/test_http.py 会断言缺省字面量，改配置走 PFAN_ORIGIN_ALLOW 环境变量。
 DEFAULT_ORIGINS = "pfan.example.com,127.0.0.1,localhost,192.168.1.10"
 
 

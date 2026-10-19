@@ -17,6 +17,7 @@ cd "$(dirname "$0")/.." || { echo "[FAIL] 进不去仓库根（cwd=$PWD）"; exi
 GUARD_FAILSAFE_JQ='((.temp == null or .temp >= $emerg) | not) or (.level == 100)'
 
 HOST="${PFAN_HOST:-192.168.1.10}"
+SSH_USER="${PFAN_USER:-pfan}"
 API="${PFAN_API:-http://$HOST:8789}"
 
 # 面板目录必须与 deploy.sh 和 pfanel.py 同源（都从 platform.conf 派生），否则
@@ -32,12 +33,12 @@ OPTS=(-i "$HOME/.ssh/pfan_deploy_key" -o IdentitiesOnly=yes -o BatchMode=yes -o 
 rc=0
 ok(){ printf '  [ok]   %s\n' "$1"; }
 bad(){ printf '  [FAIL] %s\n' "$1"; rc=1; }
-remote(){ timeout 25 ssh "${OPTS[@]}" "pfan@$HOST" "$@"; }
+remote(){ timeout 25 ssh "${OPTS[@]}" -l "$SSH_USER" "$HOST" "$@"; }
 . "$(dirname "$0")/smoke-lib.sh"   # svc_verdict
 warn(){ printf '  [warn] %s\n' "$1"; }
 
 # 0) 可达性 —— 不可达必须失败，不许跳过
-if ! timeout 8 ssh "${OPTS[@]}" "pfan@$HOST" true 2>/dev/null; then
+if ! timeout 8 ssh "${OPTS[@]}" -l "$SSH_USER" "$HOST" true 2>/dev/null; then
   echo "[FAIL] 目标机 SSH 不可达 —— 不允许跳过"
   exit 1
 fi
@@ -159,10 +160,15 @@ else
 fi
 
 printf '\n=== 3. 公网入口 ===\n'
-code=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://pfan.example.com/pfan 2>/dev/null || echo 000)
+# 探哪个入口必须来自配置，不写死在脚本里：即使默认值是占位域名，断言也得对着
+# 【这次部署实际配置的那个基址】发请求，否则它只是在测一个与部署无关的常量。
+# PFAN_API_BASE 与 deploy.sh 的就绪检查同名同义（deploy 里可用 PFAN_API 覆盖），
+# 目标机只能经隧道/公网到达时由操作者显式设置。
+PUBLIC_BASE="${PFAN_API_BASE:-https://pfan.example.com}"
+code=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$PUBLIC_BASE/pfan" 2>/dev/null || echo 000)
 # 失败路径可能得到 "000\n000" 之类的多行串，直接进数值比较会以看不懂的方式全挂 —— 只取 3 位状态码
 code=${code:0:3}
-if [ "$code" = 200 ]; then ok "pfan.example.com/pfan = 200"; else bad "公网入口 = $code"; fi
+if [ "$code" = 200 ]; then ok "公网入口 $PUBLIC_BASE/pfan = 200"; else bad "公网入口 $PUBLIC_BASE/pfan = $code"; fi
 
 printf '\n=== 3b. 静态路由（拆分后的面板资源）===\n'
   # vendor 路由必须一起验：漏装时 app.js 的 ESM import 失败、整个面板不执行，
@@ -250,7 +256,7 @@ elif grep -qE "$SECRET_RE" panel/app.js panel/index.html; then
 else
   ok "仓库面板只含 __PFAN_TOKEN__ 占位符"
 fi
-# 部署件目录对 pfan 不可读（2026-10-07 实测 grep 直读报 Permission denied），
+# 部署件目录对部署用户不可读（2026-10-07 实测 grep 直读报 Permission denied），
 # 与上面 sha256sum 一样必须带 sudo 兜底；否则会把【读不到】误报成【占位符不存在】——
 # 一条指向完全相反的失败信息，会把人引去查服务端注入逻辑而不是权限。
 dep_grep(){   # dep_grep <regex> <files...>  → 0=匹配 1=没匹配 2=两次都读不到
@@ -284,7 +290,7 @@ else
   TZP=$(echo "$PC" | sed -n 's/^THERMAL_ZONE=//p' | head -1)
   if [ -n "$TZP" ] && [ -r "$TZP" ]; then ok "热区文件可读: $TZP"
   elif [ -n "$TZP" ]; then
-    # pfan 可能没有该路径权限，用 sudo 复核
+    # 部署用户可能没有该路径权限，用 sudo 复核
     if remote "[ -r '$TZP' ]" 2>/dev/null; then ok "热区文件可读(需root): $TZP"
     else bad "热区文件不可读: $TZP"; fi
   else bad "THERMAL_ZONE 为空"; fi

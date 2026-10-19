@@ -264,7 +264,7 @@ still passes."
 - [ ] **Step 1: 确认分歧存在**
 
 ```bash
-cd ~/pfan && timeout 60 ssh -o ConnectTimeout=15 -o IdentitiesOnly=yes pfan@192.168.1.10 \
+cd ~/pfan && timeout 60 ssh -o ConnectTimeout=15 -o IdentitiesOnly=yes <deploy user>@192.168.1.10 \
   'sudo -n grep -c "^PANEL_DIR=" /etc/pfan/platform.conf || echo 0'
 ```
 
@@ -385,7 +385,7 @@ so it can be made honestly."
 ```bash
 cd ~/pfan && echo "  --list 宣称 $(bash scripts/sanitize.sh --list 2>/dev/null | grep -cE '^[[:space:]]+\S') 类"
 echo "  实际规则 $(grep -c $'\t' scripts/sanitize.sh) 条"
-echo "  pfan@ 命中 $(bash scripts/sanitize.sh 2>/dev/null | grep -c 'pfan@') 处（应 >0）"
+echo "  登录串 命中 $(bash scripts/sanitize.sh 2>/dev/null | grep -c '带用户名的远端目标') 处（应 >0）"
 ```
 
 Expected: `5` / `3` / `0`。**最后那个 0 就是缺陷**：SSH 用户名正是这个门宣称要拦的，
@@ -464,7 +464,7 @@ cd ~/pfan && git add scripts/sanitize.sh hooks/pre-push tests/shell/test_repo_hy
 
 8013ff0 shipped the gate with --list advertising five categories and three compiled rules.
 The two it did not compile were 'user@host SSH targets' and 'private LAN subnets' — and
-'pfan@' sits in nine lines across executable files while 192.168.1.10 sits in twenty. The
+login strings sat in nine lines across executable files while the private LAN address sat in twenty. The
 gate the audit flagged as the blocker before going public passed both of them.
 
 --list now walks the compiled rules instead of printing prose, so the claim and the

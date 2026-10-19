@@ -567,7 +567,7 @@ Mutation-verified."
 - 无代码改动。验证步骤。
 
 **Interfaces:**
-- Consumes: `scripts/deploy.sh`、`scripts/smoke.sh`、目标机 `192.168.1.10`
+- Consumes: `scripts/deploy.sh`、`scripts/smoke.sh`、目标机 `192.168.1.10`（占位地址）
 - Produces: 部署后的实机状态、面板可用性证据
 
 - [ ] **Step 1: 本地全量门禁**
@@ -590,7 +590,7 @@ Expected: `deploy OK`。恢复点必须报 `10/10`，暂存区文件齐备，`sm
 - [ ] **Step 3: 实机确认三条修复都在位**
 
 ```bash
-timeout 60 ssh -o ConnectTimeout=15 -o IdentitiesOnly=yes pfan@192.168.1.10 \
+timeout 60 ssh -o ConnectTimeout=15 -o IdentitiesOnly=yes <deploy user>@192.168.1.10 \
   'echo "  level: $(sudo -n /usr/local/bin/pfan get 2>/dev/null | tail -1)"
    for s in pfanctl pfand pfanel; do printf "    %-9s %s\n" $s "$(systemctl is-active $s)"; done
    echo "    部署件 sha 一致: $(sudo -n sha256sum /usr/local/bin/pfanel.py | cut -c1-16)"'

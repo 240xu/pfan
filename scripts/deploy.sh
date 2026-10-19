@@ -8,6 +8,8 @@ trap 'echo "[FAIL] deploy 中止于第 $LINENO 行" >&2' ERR
 cd "$(dirname "$0")/.."
 
 HOST="${PFAN_HOST:-192.168.1.10}"
+# 部署账号：目标机上真实存在的那个 SSH 用户，缺省是通用的 pfan。
+SSH_USER="${PFAN_USER:-pfan}"
 # 就绪检查用的 API 根：默认直连 LAN 的 $HOST:8789；目标机只能经隧道/公网到达时，
 # 用 PFAN_API_BASE 覆盖（例：https://pfan.example.com）。两者都不可达时该步会失败，
 # 这比"悄悄跳过就绪检查"安全 —— 服务没起来就不该继续。
@@ -37,13 +39,13 @@ _retry(){ # _retry <描述> <命令...>
   done
 }
 # R/S：每次调用先探一次连通性，隧道抖动就重试（有界）。探活用 -o ConnectTimeout=8。
-R(){ _retry "ssh $HOST" ssh "${SSHOPT[@]}" -o ConnectTimeout=8 pfan@"$HOST" true \
-      && ssh "${SSHOPT[@]}" pfan@"$HOST" "$@"; }
+R(){ _retry "ssh $HOST" ssh "${SSHOPT[@]}" -o ConnectTimeout=8 -l "$SSH_USER" "$HOST" true \
+      && ssh "${SSHOPT[@]}" -l "$SSH_USER" "$HOST" "$@"; }
 # 传输走 tar-over-ssh 而不是 scp：实测本机 scp 对该目标静默失败（连续 4 次、无输出、
 # rc≠0），而 tar|ssh 一次连接传全部文件更快也更稳。目标机只需有 tar（Ubuntu 默认有）。
 # 用法：S <本地相对路径...> —— 打进 $STAGE/ 的【扁平】文件名（tar 里剥掉目录前缀），
 # 因为安装段按 $STAGE/<name> 取。用一次连接传完，比逐个 scp 更快也更抗抖动。
-S(){ _retry "tar|ssh $HOST" ssh "${SSHOPT[@]}" pfan@"$HOST" true \
+S(){ _retry "tar|ssh $HOST" ssh "${SSHOPT[@]}" -l "$SSH_USER" "$HOST" true \
       && { local t; t=$(mktemp -d "${TMPDIR:-/tmp}/pfansend.XXXXXX") || return 1
            # 必须显式改名落盘：cp "src" "$t/" 遇到同名会【拒绝覆盖】（实测
            # "will not overwrite just-created"），于是 core/pfan 与
@@ -66,7 +68,7 @@ S(){ _retry "tar|ssh $HOST" ssh "${SSHOPT[@]}" pfan@"$HOST" true \
              # 直到 install 报 "cannot stat" 才暴露，而且看不出是哪一步丢的。
              local rc=0
              set -o pipefail 2>/dev/null || true
-             tar -cf - -C "$t" . | ssh "${SSHOPT[@]}" pfan@"$HOST" "mkdir -p '$STAGE' && tar -xf - -C '$STAGE'" || rc=$?
+             tar -cf - -C "$t" . | ssh "${SSHOPT[@]}" -l "$SSH_USER" "$HOST" "mkdir -p '$STAGE' && tar -xf - -C '$STAGE'" || rc=$?
              set +o pipefail 2>/dev/null || true
              rm -rf "$t"; return $rc; }; }
 TS=$(date +%Y%m%d-%H%M%S)
@@ -95,7 +97,7 @@ echo "== 0/5 本地 CI =="
 bash scripts/ci.sh || { echo "[FAIL] 本地 CI 未通过 —— 部署中止（不碰目标机）" >&2; exit 1; }
 
 echo "== 1/5 目标机建恢复点 + 暂存新文件 =="
-# 备份目录在 /root 下 → 必须 sudo；暂存目录必须由 pfan 拥有，否则 scp 写不进去
+# 备份目录在 /root 下 → 必须 sudo；暂存目录必须由部署用户拥有，否则 scp 写不进去
 R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan $PDIR/vendor && \
     for f in /usr/local/bin/pfand /usr/local/bin/pfan /usr/local/bin/pfanel.py \
              /usr/local/bin/pfan_platform.py /usr/local/bin/pfan_core.py; do \
@@ -114,7 +116,7 @@ R "mkdir -p '$STAGE' && sudo -n mkdir -p '$B' /etc/pfan /usr/local/lib/pfan $PDI
                  /opt/pfanctl/presets/pfan.conf.cool-quiet \
                  /opt/pfanctl/presets/pfan.conf.performance; do
            # ⚠ [ -e ] 必须带 sudo：面板目录 $PDIR 是 drwx------ root:root，
-           # pfan 无权穿越，于是非 sudo 的 [ -e ] 一律 false，7 个面板文件的备份被【静默跳过】，
+           # 部署用户无权穿越，于是非 sudo 的 [ -e ] 一律 false，7 个面板文件的备份被【静默跳过】，
            # 而 || true 让它看不出错 —— 恢复点少了第 3 步要覆盖的全部面板文件（实测确认）。
            # 这就是「把面板装在别的应用私有目录」（专家审计 m-7）的真实代价。
            sudo -n test -e "\$f" && sudo -n cp -a --parents "\$f" '$B/' || true; done; \

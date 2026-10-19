@@ -48,9 +48,18 @@ bash scripts/install-hooks.sh    # 装 pre-push 钩子（.git/hooks 不受版本
 
 前置：`~/.ssh/pfan_deploy_key` 密钥可用、目标机可达（别名见 `~/.ssh/config`）。
 
+目标机与部署账号不是仓库里的占位缺省时，**部署前必须显式设置**（仓库里不再保留真实值）：
+
 ```bash
+export PFAN_HOST=192.168.1.10     # 目标机地址；缺省是文档用的 LAN 占位地址
+export PFAN_USER=pfan             # 部署账号；缺省 pfan
+export PFAN_API_BASE=https://pfan.example.com   # 公网入口；smoke §3 探的就是它
 bash scripts/deploy.sh
 ```
+
+`PFAN_HOST` / `PFAN_USER` 在 `deploy.sh`、`smoke.sh`、`hooks/pre-push` 三处读同一组
+环境变量，换机器时不要改脚本文本。`PFAN_API_BASE` 未设置时 smoke 会去探占位域名，
+在真实部署上必然失败 —— 这是有意的：探一个与本次部署无关的地址不叫冒烟。
 
 脚本顺序（不得手拆子步骤）：本地 `ci.sh` → 目标机建恢复点
 `/root/backups/pfan-deploy-<时间戳>/` 并暂存新文件 → 传输安装（平台配置**只在缺失时**
@@ -67,7 +76,7 @@ bash scripts/deploy.sh
 **回滚**：把恢复点里的文件拷回原位 + `systemctl restart pfanel pfand`
 （**不要**顺手重启 `pfanctl` —— deploy 不动内核模块，见「服务」一节的覆盖边界），
 逐步骤见 `docs/OPERATIONS.md`。该流程的恢复点布局核对自
-`/root/backups/pfan-deploy-<timestamp>` 的实际内容，并已在目标机实操验证。
+`/root/backups/pfan-deploy-<时间戳>` 的实际内容，并已在目标机实操验证。
 部署本身会在恢复点不完整时**中止**（`deploy/check-recovery-point.sh` 逐个核对第 3 步
 要覆盖的每一个路径）。
 

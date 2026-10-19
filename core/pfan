@@ -34,7 +34,7 @@ PFAN_SERVICE="${PFAN_SERVICE:-pfand}"
 DEV="${PFAN_DEV:-}" ; [ -n "$DEV" ] || DEV=$(pfan_plat DEV 2>/dev/null) || DEV=/dev/pfanctl
 LOCK="${PFAN_LOCK:-/run/pfanel.lock}"
 # dmesg 读取接缝（约定同 core/pfand：PFAN_DMESG，缺省 dmesg）。生产从不设置：
-# 未设置时执行 `sudo -n dmesg` —— 与历史行为完全一致（pfan 直读 dmesg 可能被
+# 未设置时执行 `sudo -n dmesg` —— 与历史行为完全一致（部署用户直读 dmesg 可能被
 # dmesg_restrict 拦）；设置后直接执行该命令 —— 测试/冒烟用它指向伪 dmesg，免 root。
 # run()/acpi_ok() 里每一处 dmesg 读取都走 dmesg_out，不再各自硬编码 sudo -n dmesg。
 DMESG="${PFAN_DMESG:-dmesg}"
